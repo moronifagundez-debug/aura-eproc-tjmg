@@ -1,0 +1,183 @@
+[
+  {
+    "timestamp": "2026-06-28 10:53:20",
+    "tela": "Tela 1 - Dados Iniciais",
+    "linha": 1,
+    "campos_novos": [
+      "chkRenunciaValor",
+      "chkValorAlcada",
+      "selIdSigilo",
+      "selInfraUnidades",
+      "selLocalidadeJudicial",
+      "txtNumProcessoPesquisaRapida",
+      "txtSinExibeOriginario",
+      "txtSinExigeOriginario",
+      "txtSinVinculaOriginario",
+      "txtValorCausa"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:53:40",
+    "tela": "Tela Partes - Autor",
+    "linha": 1,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:53:50",
+    "tela": "Tela Partes - Reu",
+    "linha": 1,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:56:21",
+    "tela": "Tela 1 - Dados Iniciais",
+    "linha": 2,
+    "campos_novos": [
+      "chkRemeterPlantao",
+      "chkRenunciaValor",
+      "chkValorAlcada",
+      "selIdJuizo",
+      "selIdSigilo",
+      "selInfraUnidades",
+      "selLocalidadeJudicial",
+      "selTipoJusticaProcesso",
+      "selTipoOrigemJudicial",
+      "txtNumProcessoPesquisaRapida",
+      "txtSinExibeOriginario",
+      "txtSinExigeOriginario",
+      "txtSinVinculaOriginario",
+      "txtValorCausa"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:56:38",
+    "tela": "Tela Assunto",
+    "linha": 2,
+    "campos_novos": [
+      "selInfraUnidades",
+      "txt-C-livre",
+      "txt-D-livre",
+      "txt-M-livre",
+      "txtArtigo",
+      "txtDesAssunto",
+      "txtGlossario",
+      "txtNorma",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:56:51",
+    "tela": "Tela Partes - Autor",
+    "linha": 2,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selJusticaAutor11728581494849469844931222669",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 10:56:59",
+    "tela": "Tela Partes - Reu",
+    "linha": 2,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selJusticaAutor11745864092731209927314028594",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 15:08:50",
+    "tela": "Tela 1 - Dados Iniciais",
+    "linha": 1,
+    "campos_novos": [
+      "chkRenunciaValor",
+      "chkValorAlcada",
+      "selIdSigilo",
+      "selInfraUnidades",
+      "selLocalidadeJudicial",
+      "txtNumProcessoPesquisaRapida",
+      "txtSinExibeOriginario",
+      "txtSinExigeOriginario",
+      "txtSinVinculaOriginario",
+      "txtValorCausa"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 15:09:13",
+    "tela": "Tela Partes - Autor",
+    "linha": 1,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  },
+  {
+    "timestamp": "2026-06-28 15:09:21",
+    "tela": "Tela Partes - Reu",
+    "linha": 1,
+    "campos_novos": [
+      "chkSemCpfCnpj",
+      "selEntidade",
+      "selInfraUnidades",
+      "selPrincipalEnt",
+      "selSemCnpj",
+      "selSemCpf",
+      "selTipoDoc",
+      "selTipoFiltroNome",
+      "txtJuizoEstadual",
+      "txtNumDoc",
+      "txtNumProcessoPesquisaRapida"
+    ]
+  }
+]

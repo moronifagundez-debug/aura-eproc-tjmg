@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "AURA Sessão de Julgamento",
+  "version": "1.0.0",
+  "description": "Acompanhamento ao vivo de sessões de julgamento no eproc (TJMG): status por processo, divergências e votos disponibilizados ao colegiado.",
+  "permissions": ["storage", "alarms", "notifications", "scripting"],
+  "host_permissions": [
+    "https://eproc2g.tjmg.jus.br/*",
+    "https://eproc2g-hml.tjmg.jus.br/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://eproc2g.tjmg.jus.br/eproc/controlador.php*",
+        "https://eproc2g-hml.tjmg.jus.br/eproc/controlador.php*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://eproc2g.tjmg.jus.br/eproc/controlador.php*",
+        "https://eproc2g-hml.tjmg.jus.br/eproc/controlador.php*",
+        "https://eproc2g.tjmg.jus.br/versao/*",
+        "https://eproc2g-hml.tjmg.jus.br/versao/*"
+      ],
+      "js": ["lib/spike_diagnostics.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://eproc2g.tjmg.jus.br/eproc/controlador.php*",
+        "https://eproc2g-hml.tjmg.jus.br/eproc/controlador.php*",
+        "https://eproc2g.tjmg.jus.br/versao/*",
+        "https://eproc2g-hml.tjmg.jus.br/versao/*"
+      ],
+      "js": ["main_world_bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AURA Sessão de Julgamento",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
