@@ -189,14 +189,28 @@ def capturar_dados_finais(driver, wait, aviso=""):
         return None
 
 
-def clicar_seguro(driver, wait, xpath):
+def clicar_seguro(driver, wait, xpath, obrigatorio=False):
+    """Clica num elemento localizado por XPath.
+
+    obrigatorio=True para cliques criticos (abertura da Peticao Inicial,
+    barra de acao): nesses casos a falha levanta RuntimeError em vez de so
+    imprimir um aviso. Falhar em silencio fazia o robo seguir o fluxo numa
+    tela errada, e o problema so aparecia muito depois -- tipicamente como
+    "selecao errada" na Tela 1, sem nenhuma pista da causa real.
+
+    Retorna True se clicou, False se falhou e nao era obrigatorio.
+    """
     try:
         elemento = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
         time.sleep(0.5)
         driver.execute_script("arguments[0].click();", elemento)
+        return True
     except Exception as e:
+        if obrigatorio:
+            raise RuntimeError(f"Clique obrigatorio falhou em {xpath}: {e}") from e
         print(f"[aura] Aviso: clicar_seguro falhou em {xpath}: {e}")
+        return False
 
 
 def aceitar_alertas_pendentes(driver, tentativas=3):
@@ -850,12 +864,24 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
         driver.find_element(By.ID, "pwdSenha").send_keys(SENHA)
         clicar_seguro(driver, wait, '//*[@id="sbmEntrar"]')
 
-        # PERFIL
-        if perfil_cinprot:
-            clicar_seguro(driver, wait, '//*[@data-descricao="DIRETOR DISTRIBUIÇÃO / CINPROT"]')
-        else:
-            clicar_seguro(driver, wait, '//*[@id="tr1"]')
-        clicar_seguro(driver, wait, '//*[@id="action-bar"]/a[1]')
+        # PERFIL -- busca o perfil pelo TEXTO, nunca por posicao fixa.
+        # O clique em '//*[@id="tr1"]' (primeira linha da lista) so funcionava
+        # enquanto a conta tinha poucos perfis; depois que ela ganhou dezenas
+        # de lotacoes de GABINETE/SECRETARIA a primeira linha deixou de ser
+        # ADVOGADO, e o robo passava a peticionar logado no perfil errado.
+        # Isso aparecia adiante como "selecao errada" na Tela 1, porque o
+        # <select> selIdGrupoCompetencia vem populado conforme o perfil ativo
+        # e a planilha guarda POSICAO (POS n), nao o nome da competencia.
+        # Mesma correcao ja aplicada no peticionamento intermediario.
+        perfil_alvo = "DIRETOR DISTRIBUIÇÃO / CINPROT" if perfil_cinprot else "ADVOGADO"
+        status.configure(text=f"Status: Selecionando perfil {perfil_alvo}...")
+        if not _run_cotri.selecionar_perfil(driver, perfil_alvo):
+            raise RuntimeError(
+                f"Nao foi possivel selecionar o perfil {perfil_alvo}. "
+                "Verifique se a conta tem esse perfil na tela de Selecao de Perfil."
+            )
+        print(f"[aura] Perfil selecionado: {perfil_alvo}")
+        clicar_seguro(driver, wait, '//*[@id="action-bar"]/a[1]', obrigatorio=True)
 
         linhas_lista = DADOS_COMPETENCIA
         idx = 0
@@ -870,7 +896,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                 try:
                     time.sleep(2)
                     wait.until(EC.presence_of_element_located((By.XPATH, "//a[@aria-label='Petição Inicial']")))
-                    clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']")
+                    clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']", obrigatorio=True)
 
                     id_area = int(linha['AREA'].split("POS ")[-1])
                     id_classe = int(linha['Classeprocessual'].split("POS ")[-1])
@@ -1285,7 +1311,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     except:
                         time.sleep(1)
                         wait.until(EC.presence_of_element_located((By.XPATH, "//a[@aria-label='Petição Inicial']")))
-                        clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']")
+                        clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']", obrigatorio=True)
                     time.sleep(2)
                     idx += 1
 
