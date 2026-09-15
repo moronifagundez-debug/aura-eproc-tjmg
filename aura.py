@@ -23,6 +23,7 @@ from aura_db import (
     gravar_historico_intermediario,
     ler_historico_intermediario,
     inicializar_planilha,
+    proximo_tipo_redistribuicao,
 )
 from aura_sheet_selector import SheetSelectorFrame
 from aura_infra import (
@@ -89,8 +90,8 @@ _TEXTO_MINUTA_TESTE_REGRESSAO = (
     "[TESTE DE REGRESSÃO AURA -- NÃO É UMA DECISÃO REAL]"
 )
 
-USUARIO = os.environ.get("AURA_USUARIO", "")
-SENHA = os.environ.get("AURA_SENHA", "")
+USUARIO = "MG123456"
+SENHA = "Senha*123456"
 URL = "https://eproc2g-hml.tjmg.jus.br/eproc/"
 PAUSADO = False
 lbl_strip_comp = None
@@ -154,6 +155,8 @@ def salvar_no_historico(dados):
         chave=dados.get("Chave", ""),
         aviso=dados.get("Aviso", ""),
         competencia=dados.get("Competência", ""),
+        assunto=dados.get("Assunto", ""),
+        tipo_redistribuicao=dados.get("Tipo_redistribuicao", ""),
     )
 
 
@@ -168,7 +171,7 @@ def salvar_historico_intermediario(dados):
     )
 
 
-def capturar_dados_finais(driver, wait, aviso=""):
+def capturar_dados_finais(driver, wait, aviso="", assunto=""):
     try:
         num_processo = wait.until(EC.presence_of_element_located((By.ID, "lblDesNumProcesso"))).text
         classe = driver.find_element(By.ID, "lblDesClasse").text
@@ -182,10 +185,30 @@ def capturar_dados_finais(driver, wait, aviso=""):
             "Chave": chave.strip(),
             "Aviso": aviso,
             "Competência": NOME_COMPETENCIA,
+            # Alimentam o AURA COTRI (ver ESTUDO_AURA_COTRI.md):
+            # Assunto vem da linha da competência; Tipo_redistribuicao é
+            # atribuído em rodízio pelos 12 tipos.
+            "Assunto": (assunto or "").strip(),
+            "Tipo_redistribuicao": proximo_tipo_redistribuicao(),
         }
         salvar_no_historico(dados)
         return dados
-    except:
+    except Exception as e:
+        # Antes este except era mudo e escondia falhas de gravação na planilha
+        # (petição concluía, mas nada era registrado e nenhum erro aparecia).
+        # Agora registra a causa: aparece no console (python aura.py) e num log
+        # ao lado do executável, para diagnóstico.
+        import traceback
+        msg = f"[aura] Falha ao capturar/gravar dados finais na planilha: {e}"
+        print(msg)
+        traceback.print_exc()
+        try:
+            caminho_log = os.path.join(_pasta_config_externa(), "aura_gravacao_planilha.log")
+            with open(caminho_log, "a", encoding="utf-8") as _f:
+                _f.write(time.strftime("%d/%m/%Y %H:%M:%S") + "  " + msg + "\n")
+                _f.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
         return None
 
 
@@ -1274,7 +1297,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     # Coleta avisos registrados durante o peticionamento
                     aviso_final = " | ".join(_ultimo_aviso) if _ultimo_aviso else ""
                     _ultimo_aviso.clear()
-                    capturar_dados_finais(driver, wait, aviso_final)
+                    capturar_dados_finais(driver, wait, aviso_final, assunto=assunto)
                     # Tenta btnNovaPeticao, senão vai pelo menu
                     try:
                         btn = driver.find_elements(By.ID, "btnNovaPeticao")
