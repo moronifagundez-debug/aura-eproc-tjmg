@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 import certifi
 
@@ -11,6 +12,12 @@ datas = [
     # Certificados SSL necessários para requests/urllib3 chamar a API Google
     (certifi.where(), 'certifi'),
 ]
+
+# IDs das planilhas: se o aura_sheets.json existir na raiz no momento do build,
+# ele é embutido no .exe. Assim o executável já aponta para as SUAS planilhas.
+# (Também pode ser colocado ao lado do AURA.exe depois, que tem prioridade.)
+if os.path.exists('aura_sheets.json'):
+    datas.append(('aura_sheets.json', '.'))
 binaries = []
 hiddenimports = [
     'requests', 'certifi',

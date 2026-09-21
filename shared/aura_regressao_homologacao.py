@@ -1087,7 +1087,7 @@ def passo8_cartorio_avancar_sessao(driver, wait, filtro_sessao, presidente, vota
 # navegar_ate_painel_sessao_via_calendario (run_aura_sessao_julgamento.py)
 # nunca clicaram/navegaram de verdade, só foram inspecionados por DOM.
 # Tratar a primeira execução real como teste acompanhado (headless=False),
-# ver roteiro em MAPEAMENTO_SESSAO_JULGAMENTO_HANDOFF.md.
+# ver roteiro em docs/MAPEAMENTO_SESSAO_JULGAMENTO_HANDOFF.md.
 def passo8b_votar_um_vogal(nome_vogal, url, filtro_sessao, votos,
                             senha=SENHA_HOMOLOGACAO_PADRAO, log=print):
     """Loga sozinho como `nome_vogal` (conta própria, driver dedicado --

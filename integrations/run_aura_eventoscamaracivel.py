@@ -73,7 +73,7 @@ PASTA_DUMPS = OUTPUT_DIR / "dumps"
 # carregar_config() e a unica fonte; sem config salvo, o app pede login na tela.
 USUARIO_PADRAO = ""
 SENHA_PADRAO = ""
-URL_PADRAO = "https://eproc2g-hml.tjmg.jus.br/versao/"
+URL_PADRAO = "https://eproc2g-hml.tjmg.jus.br/eproc/"
 
 ORGAOS_JSON_PATH = _cotri.base_path("orgaos_caciv.json")
 

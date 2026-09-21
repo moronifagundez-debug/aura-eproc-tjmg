@@ -13,7 +13,7 @@
 #        aura_credentials.json
 #
 #  PLANILHA:
-#    ID: 1KUiDarIDVsFf4JWeOpUa_6iWl-5vJWM2uUVMkjecSVY
+#    ID: embutido no código (aura_sheets.json é override opcional)
 #    Abas: processos_ajuizados | historico_intermediario
 # ============================================================
 
@@ -32,29 +32,147 @@ _CRYPTO_OK = True
 #  CONFIGURAÇÃO
 # ----------------------------------------------------------
 
-SPREADSHEET_ID   = "1KUiDarIDVsFf4JWeOpUa_6iWl-5vJWM2uUVMkjecSVY"
+# IDs padrão EMBUTIDOS (Forma B): o .exe já nasce apontando para as planilhas
+# corretas, sem precisar de nenhum arquivo junto. O aura_sheets.json continua
+# sendo um OVERRIDE opcional — se existir (ao lado do .exe ou na raiz do
+# projeto), os IDs dele têm PRIORIDADE sobre estes. Para trocar de planilha de
+# forma definitiva, edite o ID aqui e recompile.
+_SPREADSHEET_ID_PADRAO   = "1sNg3cPQu0uG_RIZqJCopNSiMDYePwwGcti1b6FWPPtU"
 ABA_PROCESSOS    = "processos_ajuizados"
 ABA_INTERMEDIARIO = "historico_intermediario"
 
-CABECALHO_PROCESSOS     = ["Data", "Classe", "Magistrado", "Processo", "Chave", "Aviso", "Competência"]
+# Colunas novas (Assunto, Tipo_redistribuicao) entram para alimentar o AURA
+# COTRI direto da planilha — ver docs/ESTUDO_AURA_COTRI.md, seções 4 e 8.
+CABECALHO_PROCESSOS     = ["Data", "Classe", "Magistrado", "Processo", "Chave", "Aviso", "Competência", "Assunto", "Tipo_redistribuicao"]
 CABECALHO_INTERMEDIARIO = ["Data", "Processo", "Evento", "Tipodocumento", "Status", "Motivo"]
 
 import sys as _sys
+
+
+def _dirs_config() -> list[str]:
+    """Pastas onde procurar arquivos de config (aura_credentials.json,
+    aura_sheets.json), em ordem de prioridade.
+
+    No .exe (congelado), procura PRIMEIRO ao lado do executável — onde o
+    usuário coloca/edita os arquivos — e só depois no bundle embutido. Assim
+    dá para trocar de planilha/credencial sem recompilar o .exe.
+    """
+    dirs = []
+    if os.environ.get("AURA_BASE_DIR"):          # subprocesso lançado pelo AURA.exe
+        dirs.append(os.environ["AURA_BASE_DIR"])
+    if hasattr(_sys, "_MEIPASS"):
+        dirs.append(os.path.dirname(_sys.executable))  # ao lado do .exe (prioridade)
+        dirs.append(_sys._MEIPASS)                      # bundle embutido (fallback)
+    else:
+        # rodando do código-fonte: raiz do projeto (este arquivo mora em shared/)
+        dirs.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    unicos = []
+    for d in dirs:
+        if d and d not in unicos:
+            unicos.append(d)
+    return unicos
+
+
+def _achar_config(nome: str) -> str:
+    """Primeiro caminho existente para `nome` entre as pastas candidatas.
+    Se não existir em nenhuma, devolve o caminho na primeira (para mensagens)."""
+    dirs = _dirs_config()
+    for d in dirs:
+        p = os.path.join(d, nome)
+        if os.path.exists(p):
+            return p
+    return os.path.join(dirs[0], nome) if dirs else nome
+
+
+# Mantido por compatibilidade com quem referencia _BASE_DIR (1ª pasta candidata).
+_BASE_DIR = _dirs_config()[0]
+
 if hasattr(_sys, "_MEIPASS"):
-    # Credenciais embutidas no bundle do executável
-    _BASE_DIR = _sys._MEIPASS
     os.environ.setdefault(
         "REQUESTS_CA_BUNDLE",
         os.path.join(_sys._MEIPASS, "certifi", "cacert.pem"),
     )
-elif os.environ.get("AURA_BASE_DIR"):
-    # Subprocesso (auragabinete) lançado pelo AURA.exe — credenciais no _MEIPASS do pai
-    _BASE_DIR = os.environ["AURA_BASE_DIR"]
-else:
-    # aura_credentials.json fica na raiz do projeto; este arquivo mora em
-    # shared/, por isso sobe um nivel.
-    _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CREDENTIALS_FILE = os.path.join(_BASE_DIR, "aura_credentials.json")
+
+CREDENTIALS_FILE = _achar_config("aura_credentials.json")
+
+# ----------------------------------------------------------
+#  IDs DAS PLANILHAS
+#  Lidos de aura_sheets.json (na mesma pasta das credenciais e ignorado pelo
+#  git). Assim cada instalação aponta para as SUAS planilhas sem editar este
+#  arquivo. Se o arquivo não existir, caem nos defaults acima/abaixo.
+#  Formato do aura_sheets.json:
+#    {
+#      "spreadsheet_id": "<id da planilha operacional>",
+#      "spreadsheet_id_competencias": "<id da planilha de competências>"
+#    }
+# ----------------------------------------------------------
+_SPREADSHEET_ID_COMPETENCIAS_PADRAO = "19BgcXguj02yI5uthWW7TBj4v22da9EAl3ZmtOU6UEu8"
+
+
+def _limpar_id_planilha(valor: str) -> str:
+    """Extrai o ID puro mesmo que colem a URL inteira do Google Sheets.
+
+    Aceita:
+      - o ID puro (1AbC...)
+      - a URL completa (.../spreadsheets/d/<ID>/edit?gid=...#gid=...)
+      - o trecho <ID>/edit?gid=...#gid=...
+    e devolve só o <ID> (sem /edit, ?query ou #hash)."""
+    valor = (valor or "").strip()
+    if "/d/" in valor:                      # URL completa
+        valor = valor.split("/d/", 1)[1]
+    valor = valor.split("/", 1)[0]          # corta /edit e o que vier depois
+    valor = valor.split("?", 1)[0].split("#", 1)[0]  # corta ?query e #hash
+    return valor.strip()
+
+
+def _carregar_ids_planilhas() -> tuple[str, str]:
+    caminho = _achar_config("aura_sheets.json")
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return (
+            _limpar_id_planilha(cfg.get("spreadsheet_id", "")),
+            _limpar_id_planilha(cfg.get("spreadsheet_id_competencias", "")),
+        )
+    except FileNotFoundError:
+        return "", ""
+    except Exception as e:
+        print(f"[aura_db] Aviso: falha ao ler aura_sheets.json: {e}")
+        return "", ""
+
+
+_id_ops, _id_comp = _carregar_ids_planilhas()
+
+# PLANILHA OPERACIONAL: o ID vem SEMPRE do código (embutido). Nenhum arquivo
+# externo (aura_sheets.json, mesmo velho, ao lado do .exe) consegue redirecionar
+# a gravação para outra planilha. É a garantia de "nunca errar de planilha" que
+# a operação pediu: para trocar de planilha, edite _SPREADSHEET_ID_PADRAO acima
+# e RECOMPILE o .exe. (O `_id_ops` lido do arquivo é ignorado de propósito.)
+SPREADSHEET_ID = _SPREADSHEET_ID_PADRAO
+if _id_ops and _id_ops != _SPREADSHEET_ID_PADRAO:
+    print(
+        "[aura_db] Aviso: 'spreadsheet_id' do aura_sheets.json foi IGNORADO — "
+        "a planilha operacional é fixa no código (" + _SPREADSHEET_ID_PADRAO + ")."
+    )
+
+# COMPETÊNCIAS: continua aceitando override opcional (aponta para a planilha do
+# AURA antigo, que guarda os dados reais). Não é a planilha de gravação, então
+# não corre o risco acima.
+SPREADSHEET_ID_COMPETENCIAS = _id_comp or _SPREADSHEET_ID_COMPETENCIAS_PADRAO
+
+
+def _sid() -> str:
+    """ID da planilha operacional, exigindo configuração. Sem aura_sheets.json
+    (com 'spreadsheet_id'), levanta erro claro em vez de gravar na planilha
+    errada."""
+    if not SPREADSHEET_ID:
+        raise RuntimeError(
+            "Planilha operacional não configurada.\n"
+            "Coloque o arquivo aura_sheets.json (com a chave 'spreadsheet_id') "
+            "AO LADO do AURA.exe — ou na raiz do projeto, ao rodar por código.\n"
+            "Sem ele, o AURA não sabe em qual planilha gravar."
+        )
+    return SPREADSHEET_ID
 
 # Cache do token em memória (evita uma chamada OAuth a cada operação)
 _token_cache = {"token": None, "expires_at": 0}
@@ -119,7 +237,7 @@ def _headers() -> dict:
 
 def _ler_aba(aba: str) -> list[list]:
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f"/values/{aba}"
     )
     resp = requests.get(url, headers=_headers(), timeout=15)
@@ -130,7 +248,49 @@ def _ler_aba(aba: str) -> list[list]:
     return resp.json().get("values", [])
 
 
+def _titulos_abas() -> list[str]:
+    """Nomes de todas as abas da planilha operacional. Serve para saber se a
+    aba já existe antes de gravar (e para detectar arquivo não-nativo)."""
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
+        f"?fields=sheets.properties.title"
+    )
+    resp = requests.get(url, headers=_headers(), timeout=15)
+    resp.raise_for_status()
+    return [s["properties"]["title"] for s in resp.json().get("sheets", [])]
+
+
+def _criar_aba(aba: str):
+    """Cria uma aba nova na planilha (usado quando ela ainda não existe)."""
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
+        f":batchUpdate"
+    )
+    body = {"requests": [{"addSheet": {"properties": {"title": aba}}}]}
+    resp = requests.post(url, headers=_headers(), json=body, timeout=15)
+    resp.raise_for_status()
+
+
 def _garantir_cabecalho(aba: str, cabecalho: list[str]):
+    try:
+        titulos = _titulos_abas()
+    except requests.HTTPError as e:
+        raise RuntimeError(
+            "Não consegui abrir a planilha pelo Google Sheets API.\n"
+            "Verifique dois pontos:\n"
+            "  1) O arquivo no Drive precisa ser uma PLANILHA GOOGLE nativa "
+            "(não pode continuar como .xlsx). Converta com 'Abrir com > "
+            "Planilhas Google' e use o ID da planilha nova.\n"
+            "  2) A planilha precisa estar compartilhada como Editor com o "
+            "e-mail da conta de serviço (client_email do aura_credentials.json).\n"
+            f"Detalhe técnico: {e}"
+        ) from e
+
+    if aba not in titulos:
+        _criar_aba(aba)
+        _append_linhas(aba, [cabecalho])
+        return
+
     dados = _ler_aba(aba)
     if not dados:
         _append_linhas(aba, [cabecalho])
@@ -139,7 +299,7 @@ def _garantir_cabecalho(aba: str, cabecalho: list[str]):
 def _append_linhas(aba: str, linhas: list[list]):
     # Range explícito A1 é obrigatório para o append funcionar em abas vazias
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f"/values/{aba}!A1:append"
         f"?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     )
@@ -174,15 +334,59 @@ def gravar_processo_ajuizado(
     chave: str,
     aviso: str = "",
     competencia: str = "",
+    assunto: str = "",
+    tipo_redistribuicao: str = "",
 ):
-    """Grava uma linha nova na aba processos_ajuizados."""
+    """Grava uma linha nova na aba processos_ajuizados.
+
+    assunto e tipo_redistribuicao alimentam o AURA COTRI (ver
+    docs/ESTUDO_AURA_COTRI.md). Ficam vazios enquanto o peticionamento não os
+    preenche — a coluna já existe no cabeçalho para manter o protocolo regular.
+    """
     _garantir_cabecalho(ABA_PROCESSOS, CABECALHO_PROCESSOS)
-    _append_linhas(ABA_PROCESSOS, [[data, classe, magistrado, processo, chave, aviso, competencia]])
+    _append_linhas(ABA_PROCESSOS, [[
+        data, classe, magistrado, processo, chave, aviso, competencia,
+        assunto, tipo_redistribuicao,
+    ]])
 
 
 def processo_ja_ajuizado(processo: str) -> bool:
     """Verifica se um número de processo já existe (detecção de duplicatas)."""
     return any(r.get("Processo") == processo for r in ler_processos_ajuizados())
+
+
+# Os 12 tipos de redistribuição, na MESMA ordem e com os MESMOS nomes de
+# TIPO_RADIO_ID (integrations/run_aura_cotri.py) — é o que o COTRI resolve na
+# hora de redistribuir. O peticionamento grava um por processo, em rodízio.
+TIPOS_REDISTRIBUICAO = [
+    "Dependencia a Juizo",
+    "Dependencia a Processo/Colegiado",
+    "Dependencia a Processo/Magistrado",
+    "Impedimento do Magistrado",
+    "Suspeicao do Magistrado",
+    "Incompetencia",
+    "Incompetencia c/ Dependencia Colegiado",
+    "Incompetencia c/ Dependencia Magistrado",
+    "Livre",
+    "Retorna Autos",
+    "Alteracao da Competencia do Orgao Julgador",
+    "Por dependencia por Alteracao da Competencia",
+]
+
+
+def proximo_tipo_redistribuicao() -> str:
+    """Devolve o próximo tipo de redistribuição em rodízio cíclico.
+
+    A escolha é baseada em quantos processos já existem na aba: o processo nº N
+    recebe TIPOS_REDISTRIBUICAO[N % 12]. Assim, ao chegar no 12º tipo, volta ao
+    primeiro — cobrindo os 12 tipos de forma contínua entre execuções. Nunca
+    lança exceção: se a planilha estiver inacessível, cai no primeiro tipo.
+    """
+    try:
+        n = len(ler_processos_ajuizados())
+    except Exception:
+        n = 0
+    return TIPOS_REDISTRIBUICAO[n % len(TIPOS_REDISTRIBUICAO)]
 
 
 # ----------------------------------------------------------
@@ -242,9 +446,8 @@ def inicializar_planilha():
 
 # ----------------------------------------------------------
 #  PLANILHA DE COMPETÊNCIAS
+#  (SPREADSHEET_ID_COMPETENCIAS é resolvido no topo, junto de SPREADSHEET_ID)
 # ----------------------------------------------------------
-
-SPREADSHEET_ID_COMPETENCIAS = "19BgcXguj02yI5uthWW7TBj4v22da9EAl3ZmtOU6UEu8"
 
 CABECALHO_COMPETENCIAS = [
     "AREA", "Classeprocessual", "tipojustica",

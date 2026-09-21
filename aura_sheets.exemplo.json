@@ -1,0 +1,5 @@
+{
+  "_comentario": "Copie este arquivo para 'aura_sheets.json' (mesma pasta do aura_credentials.json) e cole os IDs das SUAS planilhas do Google Sheets. O aura_sheets.json fica fora do git. O ID e a parte da URL entre /d/ e /edit: https://docs.google.com/spreadsheets/d/<AQUI>/edit",
+  "spreadsheet_id": "COLE_AQUI_O_ID_DA_PLANILHA_OPERACIONAL",
+  "spreadsheet_id_competencias": "COLE_AQUI_O_ID_DA_PLANILHA_DE_COMPETENCIAS"
+}
