@@ -13,7 +13,7 @@
 #        aura_credentials.json
 #
 #  PLANILHA:
-#    ID: 1KUiDarIDVsFf4JWeOpUa_6iWl-5vJWM2uUVMkjecSVY
+#    ID: embutido no código (aura_sheets.json é override opcional)
 #    Abas: processos_ajuizados | historico_intermediario
 # ============================================================
 
@@ -32,14 +32,17 @@ _CRYPTO_OK = True
 #  CONFIGURAÇÃO
 # ----------------------------------------------------------
 
-# ID padrão (fallback). O ID real é lido de aura_sheets.json — ver
-# _carregar_ids_planilhas() logo abaixo do bloco de credenciais.
-_SPREADSHEET_ID_PADRAO   = "1KUiDarIDVsFf4JWeOpUa_6iWl-5vJWM2uUVMkjecSVY"
+# IDs padrão EMBUTIDOS (Forma B): o .exe já nasce apontando para as planilhas
+# corretas, sem precisar de nenhum arquivo junto. O aura_sheets.json continua
+# sendo um OVERRIDE opcional — se existir (ao lado do .exe ou na raiz do
+# projeto), os IDs dele têm PRIORIDADE sobre estes. Para trocar de planilha de
+# forma definitiva, edite o ID aqui e recompile.
+_SPREADSHEET_ID_PADRAO   = "1sNg3cPQu0uG_RIZqJCopNSiMDYePwwGcti1b6FWPPtU"
 ABA_PROCESSOS    = "processos_ajuizados"
 ABA_INTERMEDIARIO = "historico_intermediario"
 
 # Colunas novas (Assunto, Tipo_redistribuicao) entram para alimentar o AURA
-# COTRI direto da planilha — ver ESTUDO_AURA_COTRI.md, seções 4 e 8.
+# COTRI direto da planilha — ver docs/ESTUDO_AURA_COTRI.md, seções 4 e 8.
 CABECALHO_PROCESSOS     = ["Data", "Classe", "Magistrado", "Processo", "Chave", "Aviso", "Competência", "Assunto", "Tipo_redistribuicao"]
 CABECALHO_INTERMEDIARIO = ["Data", "Processo", "Evento", "Tipodocumento", "Status", "Motivo"]
 
@@ -139,8 +142,37 @@ def _carregar_ids_planilhas() -> tuple[str, str]:
 
 
 _id_ops, _id_comp = _carregar_ids_planilhas()
-SPREADSHEET_ID = _id_ops or _SPREADSHEET_ID_PADRAO
+
+# PLANILHA OPERACIONAL: o ID vem SEMPRE do código (embutido). Nenhum arquivo
+# externo (aura_sheets.json, mesmo velho, ao lado do .exe) consegue redirecionar
+# a gravação para outra planilha. É a garantia de "nunca errar de planilha" que
+# a operação pediu: para trocar de planilha, edite _SPREADSHEET_ID_PADRAO acima
+# e RECOMPILE o .exe. (O `_id_ops` lido do arquivo é ignorado de propósito.)
+SPREADSHEET_ID = _SPREADSHEET_ID_PADRAO
+if _id_ops and _id_ops != _SPREADSHEET_ID_PADRAO:
+    print(
+        "[aura_db] Aviso: 'spreadsheet_id' do aura_sheets.json foi IGNORADO — "
+        "a planilha operacional é fixa no código (" + _SPREADSHEET_ID_PADRAO + ")."
+    )
+
+# COMPETÊNCIAS: continua aceitando override opcional (aponta para a planilha do
+# AURA antigo, que guarda os dados reais). Não é a planilha de gravação, então
+# não corre o risco acima.
 SPREADSHEET_ID_COMPETENCIAS = _id_comp or _SPREADSHEET_ID_COMPETENCIAS_PADRAO
+
+
+def _sid() -> str:
+    """ID da planilha operacional, exigindo configuração. Sem aura_sheets.json
+    (com 'spreadsheet_id'), levanta erro claro em vez de gravar na planilha
+    errada."""
+    if not SPREADSHEET_ID:
+        raise RuntimeError(
+            "Planilha operacional não configurada.\n"
+            "Coloque o arquivo aura_sheets.json (com a chave 'spreadsheet_id') "
+            "AO LADO do AURA.exe — ou na raiz do projeto, ao rodar por código.\n"
+            "Sem ele, o AURA não sabe em qual planilha gravar."
+        )
+    return SPREADSHEET_ID
 
 # Cache do token em memória (evita uma chamada OAuth a cada operação)
 _token_cache = {"token": None, "expires_at": 0}
@@ -205,7 +237,7 @@ def _headers() -> dict:
 
 def _ler_aba(aba: str) -> list[list]:
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f"/values/{aba}"
     )
     resp = requests.get(url, headers=_headers(), timeout=15)
@@ -220,7 +252,7 @@ def _titulos_abas() -> list[str]:
     """Nomes de todas as abas da planilha operacional. Serve para saber se a
     aba já existe antes de gravar (e para detectar arquivo não-nativo)."""
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f"?fields=sheets.properties.title"
     )
     resp = requests.get(url, headers=_headers(), timeout=15)
@@ -231,7 +263,7 @@ def _titulos_abas() -> list[str]:
 def _criar_aba(aba: str):
     """Cria uma aba nova na planilha (usado quando ela ainda não existe)."""
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f":batchUpdate"
     )
     body = {"requests": [{"addSheet": {"properties": {"title": aba}}}]}
@@ -267,7 +299,7 @@ def _garantir_cabecalho(aba: str, cabecalho: list[str]):
 def _append_linhas(aba: str, linhas: list[list]):
     # Range explícito A1 é obrigatório para o append funcionar em abas vazias
     url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        f"https://sheets.googleapis.com/v4/spreadsheets/{_sid()}"
         f"/values/{aba}!A1:append"
         f"?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     )
@@ -308,7 +340,7 @@ def gravar_processo_ajuizado(
     """Grava uma linha nova na aba processos_ajuizados.
 
     assunto e tipo_redistribuicao alimentam o AURA COTRI (ver
-    ESTUDO_AURA_COTRI.md). Ficam vazios enquanto o peticionamento não os
+    docs/ESTUDO_AURA_COTRI.md). Ficam vazios enquanto o peticionamento não os
     preenche — a coluna já existe no cabeçalho para manter o protocolo regular.
     """
     _garantir_cabecalho(ABA_PROCESSOS, CABECALHO_PROCESSOS)

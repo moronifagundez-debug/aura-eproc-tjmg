@@ -54,12 +54,12 @@ print("aura_sheets.json      -> ", _sheets)
 print("   existe? ", os.path.exists(_sheets))
 
 _linha("2) QUAL PLANILHA ESTÁ SENDO USADA")
-print("SPREADSHEET_ID (operacional):", db.SPREADSHEET_ID)
-if db.SPREADSHEET_ID == db._SPREADSHEET_ID_PADRAO:
-    print("   >>> ATENÇÃO: este é o ID PADRÃO ANTIGO. O aura_sheets.json NÃO foi")
-    print("       lido — o app está apontando para a planilha errada.")
+print("SPREADSHEET_ID (operacional):", db.SPREADSHEET_ID or "(vazio)")
+if not db.SPREADSHEET_ID:
+    print("   >>> ATENÇÃO: nenhum ID operacional configurado. O aura_sheets.json NÃO")
+    print("       foi encontrado — coloque-o ao lado do AURA.exe (ou na raiz).")
 else:
-    print("   (ok: é um ID vindo do aura_sheets.json, não o padrão antigo)")
+    print("   (ok: ID vindo do aura_sheets.json)")
 print("SPREADSHEET_ID_COMPETENCIAS:", db.SPREADSHEET_ID_COMPETENCIAS)
 try:
     _creds = json.load(open(db.CREDENTIALS_FILE, encoding="utf-8"))

@@ -47,7 +47,7 @@ para minutar e redistribuir.
    intermediário* (`executar_intermediario`, `aura.py:1605`). O **evento** e
    o **tipo de documento são sempre os mesmos** (constantes fixas):
    - Tipo de documento: **`Documento de informação`**
-   - Evento: **`Conclusos os autos para decisão com revisão de autuação (51)`**
+   - Evento: **`Conclusos para decisão com revisão de autuação (51)`**
 5. **Setores de distribuição mudaram**: agora são **três** (seção 6). A
    seleção de perfil casa pelo **nome completo do setor**. **Qual setor
    usar é escolha do usuário** (não vamos derivar da competência
@@ -64,7 +64,7 @@ Passa a precisar por processo de:
 | Dado | Origem |
 |------|--------|
 | `numero_processo` | planilha `processos_ajuizados` |
-| `Evento` (fixo) | constante `Conclusos os autos para decisão com revisão de autuação (51)` |
+| `Evento` (fixo) | constante `Conclusos para decisão com revisão de autuação (51)` |
 | `Tipodocumento` (fixo) | constante `Documento de informação` |
 | PDF da petição | modelo único (como no intermediário, `CAMINHO_PDF`) |
 | setor | escolhido pelo usuário na UI (1 dos 3) |
@@ -162,7 +162,7 @@ motor do intermediário: `executar_peticao_intermediaria_linha` (chamado em
 
 Valores **fixos** (iguais para os 3 setores):
 - `Tipodocumento` = **Documento de informação**
-- `Evento` = **Conclusos os autos para decisão com revisão de autuação (51)**
+- `Evento` = **Conclusos para decisão com revisão de autuação (51)**
 
 Assim some a dependência de `PREFERENCIAS_POR_PERFIL` e dos nomes de
 preferência por setor.
@@ -213,14 +213,43 @@ escolha do usuário).
   competência; o tipo é gerado em rodízio pelos 12 tipos via
   `proximo_tipo_redistribuicao` em `aura_db.py`). IDs das planilhas agora
   vêm de `aura_sheets.json` (ver CONFIGURAR_PLANILHAS.md).
-- **Fase 2 — Setores:** UI com os 3 setores, match por nome completo,
-  remover defaults "COTRI"/"CODIPRE".
-- **Fase 3 — COTRI lê da planilha:** função que monta a fila a partir de
-  `ler_processos_ajuizados()` (em vez do CSV).
-- **Fase 4 — Referência calculada:** simplificar `buscar_processo_ref`
-  (número diferente + competência; fonte = planilha).
-- **Fase 5 — Minuta por peticionamento:** trocar o fluxo de preferência
-  pelo motor do intermediário, com evento/tipodoc fixos.
+- **Fase 2 — Setores:** ✅ FEITO (2026-09-17). UI com os 3 setores
+  (COMED/COAPRI/COAPUB), match por nome completo, default COAPUB; nome exibido
+  virou **AURA Distribuição**; a assinatura por preferência foi protegida (avisa
+  "em migração" para os setores novos, em vez de cair na PPG antiga).
+- **Fase 3 — Distribuição lê da planilha:** ✅ FEITO (2026-09-17). A fila da
+  minuta vem por padrão de `aura_db.ler_processos_ajuizados()` (planilha
+  central); o CSV virou opcional (só se o usuário selecionar um arquivo). A
+  coluna `Processo` entrou em `_COLUNAS_NUMERO_PROCESSO`.
+- **Fase 4 — Referência calculada:** ✅ FEITO (2026-09-18). A redistribuição
+  monta fila **e** referências a partir da planilha central
+  (`fila_redistribuicao_da_planilha`): a referência de cada processo é calculada
+  da própria planilha — **número diferente + mesma competência** (sem regra de
+  órgão), via `buscar_processo_ref`. CSVs de redistribuição/referências viraram
+  **opcionais** (alternativa). Blindagem anti-duplicidade também na redistribuição
+  (modo planilha). Processo sem par de mesma competência **não bloqueia o lote**:
+  falha/pula só a própria linha.
+- **Fase 5 — Minuta de "Informação" (NÃO é peticionamento):** ✅ IMPLEMENTADO
+  (2026-09-17), **a validar em homologação**. Correção de rumo: o combinado é
+  **MINUTAR** como o AURA Gabinete (não peticionar). O robô acessa o processo,
+  cria uma minuta de **Tipo/Modelo = "Informação"** com o **evento de conclusão**
+  `Conclusos para decisão com revisão de autuação (51)`, insere um
+  **texto fixo** e **assina** — **só gera o evento (sem remessa)**.
+  - **Motores:** formulário + inserir texto = motor do **AURA Gabinete**
+    (`EprocBotV4`, tela `minuta_cadastrar`); **assinatura = fluxo comprovado do
+    COTRI antigo** (`_salvar_e_editar` → `_assinar_no_editor` →
+    `_inserir_senha_e_confirmar`, no editor CKE + iframe).
+  - **Blindagem anti-duplicidade:** a planilha central é um log append-only;
+    processos já minutados com sucesso (registrados em
+    `~/.aura_cotri/minuta_resultados.csv`) são **pulados** (na mesma execução e
+    nas futuras), para nunca criar minutas/assinaturas repetidas.
+  - **A validar em HOMOLOGAÇÃO antes de usar pra valer** (comportamentos que só
+    a tela real confirma):
+    1. o botão "Assinar" aparece inline no editor sem pré-marcar status
+       "Para assinar" (por isso esse passo foi **removido**);
+    2. o texto fixo cai no corpo do editor (foco correto após "Salvar e Editar");
+    3. a minuta abre em nova aba e o retorno à aba principal funciona entre linhas;
+    4. o evento de conclusão é aceito via `txtEvento` (agendamento) sem remessa.
 
 Cada fase é testável isolada e mantém o CSV manual como alternativa até a
 planilha estar validada.

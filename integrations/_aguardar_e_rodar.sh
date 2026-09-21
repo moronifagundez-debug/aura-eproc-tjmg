@@ -3,7 +3,7 @@
 # via curl direto) e so entao dispara a cadeia completa. Loga tudo no mesmo
 # arquivo de log da execucao. Limite de espera: ~5h (60 tentativas x 5min).
 set -u
-URL="https://eproc2g-hml.tjmg.jus.br/versao/"
+URL="https://eproc2g-hml.tjmg.jus.br/eproc/"
 LOG="/c/Users/Penam/.aura_eventoscamaracivel/execucao_overnight.log"
 MAX_TENTATIVAS=60
 

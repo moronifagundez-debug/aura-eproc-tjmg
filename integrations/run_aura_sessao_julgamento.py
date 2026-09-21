@@ -1121,7 +1121,7 @@ def votar_item_pauta(driver, num_processo, tipo_voto, log=print) -> bool:
     # soltar achada no código-fonte do eproc (item_resultado.js) -- se
     # aparecer, o clique simples não bastou pra este caso (provável
     # divergência real entre vogais). Automação de drag-and-drop NÃO
-    # implementada -- ver MAPEAMENTO_SESSAO_JULGAMENTO_HANDOFF.md.
+    # implementada -- ver docs/MAPEAMENTO_SESSAO_JULGAMENTO_HANDOFF.md.
     if driver.find_elements(By.ID, "section-relator") or \
        driver.find_elements(By.CSS_SELECTOR, ".section-divergencia, #section-pedido-vista"):
         log("  [AVISO] Apareceu a tela de arrastar-e-soltar (item_resultado.js) -- "

@@ -1,4 +1,4 @@
-"""AURA COTRI — arquivo único.
+"""AURA Distribuição — arquivo único.
 
 Toda a aplicação (configuração, estado, leitura de planilhas, histórico,
 análise de erro via IA, automação Selenium de assinatura/redistribuição e a
@@ -52,6 +52,7 @@ if _caminho_shared not in sys.path:
 
 import aura_db
 import aura_infra as _aura_infra
+import aura_monitor
 from aura_infra import criar_chrome_driver, _detectar_scaling, _lighten
 
 logger = logging.getLogger("aura_cotri")
@@ -66,7 +67,7 @@ GITHUB_REPO = "ranyersp/aura_cotri"
 ARQUIVO_CONFIG = os.path.join(os.path.expanduser("~"), ".aura_cotri", "config.json")
 
 # Login padrao do eProc (mesmo usado no AURA Principal/AURA Gabinete) — evita
-# pedir login na abertura do AURA COTRI. carregar_config() ainda tem prioridade
+# pedir login na abertura do AURA Distribuição. carregar_config() ainda tem prioridade
 # se houver um login diferente salvo anteriormente.
 USUARIO_PADRAO = "MG123456"
 SENHA_PADRAO = "Senha*123456"
@@ -140,7 +141,7 @@ class AppState:
     caminho_planilha: Optional[str] = None
     caminho_redistribuicao: Optional[str] = None
     caminho_referencias_redistribuicao: Optional[str] = None
-    perfil: str = "COTRI"
+    perfil: str = "COAPUB"
     usuario: str = ""
     senha: str = ""
     url: str = ""
@@ -206,6 +207,10 @@ _COLUNAS_NUMERO_PROCESSO = [
     "Numero de Processo Originario",
     "NUMERO DE PROCESSO ORIGINARIO",
     "numero de processo originario",
+    # Coluna da planilha central processos_ajuizados (AURA peticionamento)
+    "Processo",
+    "processo",
+    "PROCESSO",
 ]
 
 
@@ -314,6 +319,48 @@ def ler_redistribuicao(
             return None, None
 
     return redistribuir, referencias
+
+
+def fila_redistribuicao_da_planilha() -> tuple[list[dict], list[dict]]:
+    """Fase 3+4 — monta a FILA de redistribuição e as REFERÊNCIAS a partir da
+    planilha central `processos_ajuizados` (em vez de dois CSVs).
+
+    - Fila: cada processo ajuizado vira uma linha de redistribuição, com o tipo
+      vindo da coluna `Tipo_redistribuicao` (rodízio dos 12 tipos preenchido pelo
+      peticionamento), competência/classe/assunto das colunas correspondentes.
+    - Referências (Fase 4): a referência de cada processo é CALCULADA da própria
+      planilha — todos são 2ª instância, então basta outro processo com
+      **número diferente e mesma competência** (sem regra de órgão). Isso é
+      alcançado montando `referencias` = [{competencia, processo_ref=Processo}],
+      que `buscar_processo_ref` percorre casando pela competência e descartando o
+      próprio número."""
+    registros = aura_db.ler_processos_ajuizados()
+    linhas, referencias = [], []
+    for r in registros:
+        processo = str(r.get("Processo", "") or "").strip()
+        if not re.sub(r"[^\d]", "", processo):
+            continue
+        competencia = str(r.get("Competência", r.get("Competencia", "")) or "").strip()
+        linhas.append({
+            "numero_processo": processo,
+            "tipo": str(r.get("Tipo_redistribuicao", "") or "").strip(),
+            "competencia": competencia,
+            "classe_judicial": str(r.get("Classe", "") or "").strip(),
+            "assunto": str(r.get("Assunto", "") or "").strip(),
+            "processo_ref": "",
+            "motivo_retorno": "",
+        })
+        # Só entra como referência quem tem competência preenchida: uma referência
+        # de competência VAZIA casaria com qualquer processo (bug de "referência
+        # universal" em buscar_processo_ref), gerando vínculo errado.
+        if competencia:
+            referencias.append({
+                "numero_processo": "",
+                "competencia": competencia,
+                "processo_ref": processo,
+                "magistrado_camara": "",
+            })
+    return linhas, referencias
 
 
 def _ler_csv_mapeado(caminho: str, mapa_colunas: dict, coluna_obrigatoria: str | None) -> list[dict] | None:
@@ -555,7 +602,7 @@ def _inicializar_relatorio_html():
         with open(caminho, "w", encoding="utf-8") as f:
             f.write(f"""<!doctype html>
 <html lang="pt-br"><head><meta charset="utf-8">
-<title>Relatório AURA COTRI</title>
+<title>Relatório AURA Distribuição</title>
 <style>
 body{{font-family:Segoe UI,Arial,sans-serif;background:#0f1117;color:#e6edf3;margin:20px;}}
 h1{{color:#4f8ef7;}}
@@ -567,7 +614,7 @@ tr.ok td{{background:#0d1f12;}} tr.warn td{{background:#1f1a0d;}} tr.error td{{b
 .status.ok{{color:#2ea043;}} .status.warn{{color:#e3b341;}} .status.error{{color:#da3633;}}
 .detalhe{{font-family:Consolas,monospace;font-size:11px;color:#8b949e;white-space:pre-wrap;}}
 </style></head><body>
-<h1>AURA COTRI — Relatório de Execução</h1>
+<h1>AURA Distribuição — Relatório de Execução</h1>
 <p style="color:#8b949e">Iniciado em {time.strftime('%d/%m/%Y %H:%M:%S')}</p>
 <table><thead><tr>
 <th style="width:90px">Hora</th>
@@ -622,8 +669,8 @@ def analisar_erro_com_ia(erro: str, contexto: str = "") -> str | None:
         return None
 
     prompt = (
-        "Você é um assistente técnico do sistema AURA COTRI, um robô de assinatura eletrônica do TJMG.\n"
-        "O robô encontrou o seguinte erro durante o fluxo COTRI (assinatura via preferência PPG):\n"
+        "Você é um assistente técnico do sistema AURA Distribuição, um robô de assinatura eletrônica do TJMG.\n"
+        "O robô encontrou o seguinte erro durante o fluxo de distribuição (assinatura via preferência):\n"
         f"ERRO: {erro}\n"
         f"CONTEXTO: {contexto}\n"
         "Explique em português simples:\n"
@@ -1886,6 +1933,8 @@ def executar_redistribuicao(driver, wait, status, num_fila, linha=None, referenc
 
     # Confere se a pagina mantem a estrutura esperada (deteccao de mudanca de versao)
     validar_pagina_redistribuicao(driver, status, num_fila)
+    # Monitor: detecta (uma vez) mudanças na estrutura da tela de redistribuição.
+    aura_monitor.registrar_fingerprint(driver, "redistribuicao_processo")
 
     tipo = (linha.get("tipo") or TIPO_PADRAO).strip() or TIPO_PADRAO
     tipo_resolvido, radio_id = _resolver_tipo(tipo)
@@ -2564,7 +2613,146 @@ def _clicar_primeiro_disponivel(driver, wait, seletores, descricao):
 
 
 # ===========================================================================
-# FLUXO — assinatura COTRI / CODIPRE em lote
+# MINUTA DE DISTRIBUIÇÃO (Fase 5) — "Informação" + evento de conclusão fixo
+# ---------------------------------------------------------------------------
+# NÃO é peticionamento: é MINUTAR (como o AURA Gabinete). O robô acessa o
+# processo, cria uma minuta de tipo/modelo "Informação", com o evento de
+# conclusão fixo, insere o texto padrão e assina. "Só gera o evento" (sem
+# remessa), conforme combinado. Valores FIXOS, iguais para COMED/COAPRI/COAPUB.
+# A criação+assinatura reaproveita o motor do AURA Gabinete (mesma tela
+# minuta_cadastrar), amarrado ao driver/sessão já logados do AURA Distribuição.
+# ===========================================================================
+TIPO_MINUTA_DISTRIBUICAO   = "Informação"
+EVENTO_MINUTA_DISTRIBUICAO = "Conclusos para decisão com revisão de autuação (51)"
+# O que o robô DIGITA no autocomplete do evento: SEM o sufixo "(51)". Digitar o
+# texto completo (com o número) impede o eProc de abrir/selecionar a sugestão.
+# Digitando só o texto, o autocomplete abre e o robô clica na opção certa (o
+# seletor casa pelo "núcleo", que ignora o "(51)").
+EVENTO_MINUTA_DIST_DIGITAR = "Conclusos para decisão com revisão de autuação"
+STATUS_MINUTA_DISTRIBUICAO = "Para assinar"
+# O eProc exige um "Assinante Indicado" para prosseguir. Na Distribuição, é
+# sempre o próprio usuário que cria a minuta (option value="1" do selAssinante).
+ASSINANTE_MINUTA_DISTRIBUICAO = "Usuário criador da minuta"
+TEXTO_MINUTA_DISTRIBUICAO = (
+    "Recebidos os autos distribuídos pelo Sistema eproc para revisão de autuação, informa-se:\n\n"
+    "Em conformidade com o artigo 73 e com o artigo 37, inciso I, alínea 'a', ambos do "
+    "Regimento Interno deste Tribunal, e salvo melhor juízo, a atribuição para o julgamento "
+    "deste feito não deveria recair sobre esta colenda Câmara."
+)
+
+
+def _carregar_processos_ja_minutados(caminho_csv: str) -> set:
+    """Conjunto de números de processo já minutados COM SUCESSO em execuções
+    anteriores (lidos do CSV de resultados). A planilha central é um log
+    append-only, então sem este filtro cada execução repetiria tudo — criando
+    minutas/assinaturas DUPLICADAS em processos reais. Blindagem essencial."""
+    ja = set()
+    try:
+        if os.path.exists(caminho_csv):
+            with open(caminho_csv, "r", encoding="utf-8", newline="") as f:
+                for row in csv.DictReader(f):
+                    if (row.get("Status") or "").strip().lower() == "sucesso":
+                        num = re.sub(r"[^\d]", "", str(row.get("Processo") or ""))
+                        if num:
+                            ja.add(num)
+    except Exception as e:
+        logger.warning("Falha ao ler resultados anteriores (%s): %s", caminho_csv, e)
+    return ja
+
+
+def _bot_gabinete_para_minuta(driver, wait):
+    """Instancia o motor de minuta do AURA Gabinete e o amarra ao driver/sessão
+    JÁ logados do AURA Distribuição. Reuso proposital: a criação/assinatura da
+    minuta é idêntica à do Gabinete (mesma tela minuta_cadastrar)."""
+    import auragabinete as _gab  # sibling em integrations/
+    bot = _gab.EprocBotV4(log_callback=lambda m: logger.info("[minuta] %s", m))
+    bot.driver = driver
+    bot.wait = wait
+    bot.wait_longo = WebDriverWait(driver, 45)
+    try:
+        bot._janela_principal = driver.current_window_handle
+    except Exception:
+        bot._janela_principal = None
+    return bot
+
+
+def criar_minuta_informacao_e_assinar(bot, driver, wait, senha, ultimo_aviso,
+                                      status=None, num_fila=1):
+    """Cria a minuta de 'Informação' (evento de conclusão fixo), insere o texto
+    padrão e assina. Só gera o evento (sem remessa). Pressupõe estar na capa do
+    processo.
+
+    Divisão de motores (proposital):
+      - FORMULÁRIO da minuta (tipo/modelo, status, evento) + inserir texto no
+        editor: motor do AURA Gabinete (`bot`), que já domina a tela
+        minuta_cadastrar/editor.
+      - ASSINATURA: reaproveita o fluxo COMPROVADO do AURA Distribuição antigo
+        (_salvar_e_editar → _assinar_no_editor → _inserir_senha_e_confirmar),
+        que já assina exatamente neste editor (cke_button__assinar + iframe
+        ifrSubFrm + txtSenha + sbmAssinarComSenha)."""
+    def _st(txt):
+        try:
+            if status is not None:
+                status.config(text=f"[{num_fila}] {txt}")
+        except Exception:
+            pass
+    _st("Abrindo nova minuta...")
+    bot.abrir_nova_minuta()
+    # Monitor: detecta (uma vez) mudanças na estrutura da tela minuta_cadastrar.
+    aura_monitor.registrar_fingerprint(bot.driver, "minuta_cadastrar")
+    _st("Tipo/Modelo: Informação...")
+    bot.preencher_tipo_modelo(TIPO_MINUTA_DISTRIBUICAO)
+    # Assinante indicado: sem isso o eProc bloqueia ("Selecione um Assinante
+    # Indicado"). Na Distribuição é sempre "Usuário criador da minuta"
+    # (selecionado por value="1", com fallback por texto).
+    _st("Assinante: Usuário criador da minuta...")
+    if not bot.selecionar_assinante_criador():
+        raise RuntimeError(
+            "Não consegui selecionar o assinante 'Usuário criador da minuta' "
+            "(selAssinante). O eProc não deixa concluir sem assinante indicado."
+        )
+    # NÃO pré-marcamos status "Para assinar": o fluxo comprovado do COTRI antigo
+    # assina INLINE no editor (cke_button__assinar). Pré-sinalizar poderia
+    # encaminhar a minuta à fila e remover o botão de assinar do editor.
+    _st("Marcando agendamento do evento...")
+    bot.marcar_agendamento(True)
+    _st("Evento de conclusão...")
+    # Digita SEM o "(51)" para o autocomplete abrir; o seletor casa pelo núcleo.
+    # preencher_evento_agendamento devolve o valor de hdnEvento — se vier vazio,
+    # o evento NÃO foi selecionado (o eProc bloquearia com "Selecione um Evento
+    # para Agendamento"), então avisamos com erro claro.
+    hdn_evento = bot.preencher_evento_agendamento(EVENTO_MINUTA_DIST_DIGITAR)
+    if not hdn_evento:
+        raise RuntimeError(
+            "Não consegui SELECIONAR o evento de agendamento "
+            f"('{EVENTO_MINUTA_DISTRIBUICAO}') no autocomplete. "
+            "O eProc bloqueia a minuta com 'Selecione um Evento para Agendamento'. "
+            "Confira se esse evento aparece na lista de sugestões do processo."
+        )
+
+    # Salvar e abrir o editor (fluxo do COTRI antigo) e inserir o texto fixo.
+    _salvar_e_editar(driver, wait, status, num_fila)
+    fechar_alerta_silencioso(driver, ultimo_aviso)
+    _st("Inserindo o texto da informação...")
+    bot.inserir_texto_editor(TEXTO_MINUTA_DISTRIBUICAO)
+
+    # Assinatura: exatamente como o COTRI antigo assina neste editor.
+    _assinar_no_editor(driver, wait, status, num_fila)
+    fechar_alerta_silencioso(driver, ultimo_aviso)
+    _inserir_senha_e_confirmar(driver, wait, senha, status, num_fila)
+    fechar_alerta_silencioso(driver, ultimo_aviso)
+
+    # A minuta abre em nova aba (window.open no botão "Minutar"). Após assinar,
+    # a aba costuma fechar sozinha; garante que voltamos à aba principal para a
+    # próxima linha da fila não pesquisar numa aba inválida.
+    try:
+        bot._voltar_para_aba_principal()
+    except Exception:
+        pass
+
+
+# ===========================================================================
+# FLUXO — minuta de "Informação" em lote (antiga "assinatura")
 # ===========================================================================
 _CABECALHO_CSV_ASSINATURA = ["Data", "Hora", "Processo", "Perfil", "Status", "Mensagem"]
 _CABECALHO_CSV_REDIST = ["Data", "Hora", "Processo", "Tipo", "Status", "Mensagem"]
@@ -2593,10 +2781,22 @@ def _validar_planilha_assinatura(linhas: list[dict]) -> list[str]:
     return pendencias
 
 
+def _mostrar_relatorio_monitor():
+    """Ao final do lote, mostra UMA VEZ o relatório do monitor: mudanças na
+    estrutura das páginas do eProc + resumo de erros (se houver). Não bloqueia
+    o fluxo; é só informativo para o usuário da homologação."""
+    try:
+        texto = aura_monitor.relatorio_final_texto()
+        if texto:
+            messagebox.showinfo("AURA Distribuição — Relatório da execução", texto)
+    except Exception as e:
+        logger.warning("Falha ao mostrar relatório do monitor: %s", e)
+
+
 def executar_assinatura_cotri(state, status, progresso=None):
-    perfil = getattr(state, "perfil", "COTRI") or "COTRI"
-    nome_preferencia = nome_preferencia_perfil(perfil)
-    acao_rel = f"Assinatura {perfil}"
+    perfil = getattr(state, "perfil", "COAPUB") or "COAPUB"
+    acao_rel = f"Minuta {perfil}"
+    aura_monitor.iniciar_execucao()   # zera erros/mudanças desta execução
 
     def _prog(atual, total):
         if progresso:
@@ -2604,39 +2804,70 @@ def executar_assinatura_cotri(state, status, progresso=None):
                 progresso(atual, total)
             except Exception:
                 pass
-    if not state.caminho_planilha:
-        messagebox.showerror("AURA COTRI", "Selecione a Planilha CSV com os números de processo.")
-        return
+
     if not state.url:
-        messagebox.showerror("AURA COTRI", "Informe a URL do sistema.")
+        messagebox.showerror("AURA Distribuição", "Informe a URL do sistema.")
         return
     if not state.usuario or not state.senha:
-        messagebox.showerror("AURA COTRI", "Informe o usuário e a senha.")
+        messagebox.showerror("AURA Distribuição", "Informe o usuário e a senha.")
         return
 
-    status.config(text="Status: Lendo planilha...")
-    linhas = ler_csv(state.caminho_planilha)
-    if linhas is None:
-        messagebox.showerror(
-            "AURA COTRI",
-            "Não foi possível ler o CSV. Salve-o como UTF-8 e tente novamente.",
+    # Fonte da fila (Fase 3): por padrão, a PLANILHA CENTRAL (processos_ajuizados)
+    # gerada pelo AURA peticionamento. O CSV vira apenas uma alternativa: só é
+    # usado se o usuário selecionar um arquivo manualmente.
+    if state.caminho_planilha:
+        status.config(text="Status: Lendo planilha CSV...")
+        linhas = ler_csv(state.caminho_planilha)
+        if linhas is None:
+            messagebox.showerror(
+                "AURA Distribuição",
+                "Não foi possível ler o CSV. Salve-o como UTF-8 e tente novamente.",
+            )
+            return
+    else:
+        status.config(text="Status: Lendo a planilha central (processos_ajuizados)...")
+        try:
+            linhas = aura_db.ler_processos_ajuizados()
+        except Exception as e:
+            messagebox.showerror(
+                "AURA Distribuição",
+                "Não foi possível ler a planilha central (Google Sheets):\n\n"
+                f"{e}",
+            )
+            return
+
+    if not linhas:
+        messagebox.showinfo(
+            "AURA Distribuição",
+            "Nenhum processo na fila.\n\n"
+            "Confirme que a planilha central (processos_ajuizados) tem processos "
+            "ajuizados pelo AURA peticionamento — ou selecione um CSV manualmente.",
         )
+        status.config(text="Status: fila vazia.")
         return
 
     pendencias = _validar_planilha_assinatura(linhas)
     if pendencias:
         messagebox.showerror(
-            "AURA COTRI",
-            "A planilha possui inconsistências antes de iniciar:\n\n"
+            "AURA Distribuição",
+            "A fila possui inconsistências antes de iniciar:\n\n"
             + "\n".join(pendencias[:12])
             + ("\n..." if len(pendencias) > 12 else ""),
         )
-        status.config(text="Status: Planilha com inconsistências.")
+        status.config(text="Status: fila com inconsistências.")
         return
 
     num_total = len(linhas)
     sucessos = erros = pulados = 0
-    caminho_csv = _caminho_csv_resultado(state.caminho_planilha)
+    caminho_csv = (
+        _caminho_csv_resultado(state.caminho_planilha)
+        if state.caminho_planilha
+        else str(OUTPUT_DIR / "minuta_resultados.csv")
+    )
+    # Blindagem contra duplicidade SÓ no modo planilha central (append-only):
+    # nunca re-minutar/re-assinar processo já concluído. No modo CSV manual o
+    # usuário controla o arquivo, então mantemos o comportamento antigo.
+    ja_minutados = set() if state.caminho_planilha else _carregar_processos_ja_minutados(caminho_csv)
 
     try:
         status.config(text="Status: Inicializando Chrome...")
@@ -2649,11 +2880,14 @@ def executar_assinatura_cotri(state, status, progresso=None):
 
         if not selecionar_perfil(driver, perfil):
             messagebox.showerror(
-                "AURA COTRI",
+                "AURA Distribuição",
                 f"Nao foi possivel selecionar o perfil {perfil}. "
                 "Verifique se o usuario possui esse perfil de distribuicao no eProc.",
             )
             return
+
+        # Motor de minuta reaproveitado do AURA Gabinete, amarrado a esta sessão.
+        bot_minuta = _bot_gabinete_para_minuta(driver, wait)
 
         idx = 0
         while idx < len(linhas):
@@ -2668,7 +2902,7 @@ def executar_assinatura_cotri(state, status, progresso=None):
             if not verificar_sessao_ativa(driver):
                 status.config(text="Status: Sessão do eProc encerrada — lote interrompido.")
                 messagebox.showerror(
-                    "AURA COTRI",
+                    "AURA Distribuição",
                     "A sessão do eProc expirou ou o navegador foi fechado. "
                     "Faça login novamente e reinicie o lote.",
                 )
@@ -2685,30 +2919,28 @@ def executar_assinatura_cotri(state, status, progresso=None):
                     idx += 1
                     continue
 
+                if num_processo in ja_minutados:
+                    status.config(text=f"[{num_fila}/{num_total}] {num_processo} já minutado antes — pulando.")
+                    registrar_relatorio_html(num_processo, acao_rel, "WARN",
+                                             "Já minutado em execução anterior — pulado (evita duplicidade).")
+                    pulados += 1
+                    idx += 1
+                    continue
+
                 status.config(text=f"[{num_fila}/{num_total}] Consultando processo {num_processo}...")
-                pesquisar_processo(driver, state.url, num_processo)
+                bot_minuta.pesquisar_processo(num_processo)
 
-                status.config(text=f"[{num_fila}/{num_total}] Localizando preferencia {nome_preferencia}...")
-                link_ppg = localizar_link_preferencia(driver, perfil)
+                status.config(text=f"[{num_fila}/{num_total}] Minutando 'Informação' e assinando...")
+                criar_minuta_informacao_e_assinar(
+                    bot_minuta, driver, wait, state.senha, state.ultimo_aviso, status, num_fila)
 
-                if link_ppg is None:
-                    raise Exception(
-                        f"Preferencia '{nome_preferencia}' nao encontrada. "
-                        "Verifique se o processo tem essa preferencia disponivel."
-                    )
-
-                driver.get(link_ppg.get_attribute("href"))
-                time.sleep(5)
-
-                executar_assinatura(driver, wait, state.senha, state.ultimo_aviso, status, num_fila)
-
-                status.config(text=f"[{num_fila}/{num_total}] Aguardando retorno ao processo após assinatura...")
-                time.sleep(5)
+                status.config(text=f"[{num_fila}/{num_total}] Retornando ao processo...")
+                time.sleep(3)
 
                 status.config(text=f"[{num_fila}/{num_total}] ✅ Processo {num_processo} concluído!")
                 salvar_no_historico({
                     "Data": time.strftime("%d/%m/%Y"),
-                    "Classe": f"{perfil} - {nome_preferencia}",
+                    "Classe": f"{perfil} - Minuta Informação",
                     "Magistrado": "",
                     "Processo": num_processo,
                     "Chave": "",
@@ -2720,10 +2952,11 @@ def executar_assinatura_cotri(state, status, progresso=None):
                     "Processo": num_processo,
                     "Perfil": perfil,
                     "Status": "Sucesso",
-                    "Mensagem": "Assinatura concluída com sucesso.",
+                    "Mensagem": "Minuta de Informação criada e assinada.",
                 }, _CABECALHO_CSV_ASSINATURA)
                 registrar_relatorio_html(num_processo, acao_rel, "OK",
-                                         " | ".join(state.ultimo_aviso) or "Assinatura concluída.")
+                                         " | ".join(state.ultimo_aviso) or "Minuta criada e assinada.")
+                ja_minutados.add(num_processo)   # não repetir nesta nem em execuções futuras
                 sucessos += 1
                 idx += 1
                 _prog(num_fila, num_total)
@@ -2743,6 +2976,9 @@ def executar_assinatura_cotri(state, status, progresso=None):
                     "Mensagem": str(e_linha),
                 }, _CABECALHO_CSV_ASSINATURA)
                 erros += 1
+                # Registra no monitor (log + resumo do fim). O popup já é o
+                # diálogo mostrar_erro_linha abaixo, então aqui não abrimos outro.
+                aura_monitor.notificar_erro(acao_rel, e_linha, num_fila=num_fila)
 
                 decisao = mostrar_erro_linha(num_fila, e_linha, status, contexto=f"Linha {num_fila}")
 
@@ -2769,28 +3005,34 @@ def executar_assinatura_cotri(state, status, progresso=None):
         _prog(num_total, num_total)
         status.config(text=f"Status: Lote {perfil} finalizado! ✅  {sucessos} ok · {erros} erros · {pulados} pulados")
         messagebox.showinfo(
-            "AURA COTRI",
+            "AURA Distribuição",
             f"Processamento finalizado!\n\n"
             f"✅  Concluídos: {sucessos}\n"
             f"❌  Erros:      {erros}\n"
             f"⏭  Pulados:    {pulados}\n\n"
             f"Resultados salvos em:\n{caminho_csv}",
         )
+        _mostrar_relatorio_monitor()
 
     except Exception as e:
         logger.error("Erro geral: %s", e)
         status.config(text="Erro geral.")
-        messagebox.showerror("Erro AURA COTRI", str(e))
+        aura_monitor.notificar_erro("Minuta (geral)", e)
+        messagebox.showerror("Erro AURA Distribuição", str(e))
+        _mostrar_relatorio_monitor()
 
 
 # ===========================================================================
 # FLUXO — redistribuição em lote
 # ===========================================================================
 def executar_redistribuicao_cotri(state, status, progresso=None):
-    caminho = state.caminho_redistribuicao or state.caminho_planilha
+    # Só o CSV DE REDISTRIBUIÇÃO conta aqui — o CSV da assinatura
+    # (state.caminho_planilha) não deve influenciar este fluxo.
+    caminho = state.caminho_redistribuicao
     caminho_referencias = getattr(state, "caminho_referencias_redistribuicao", None)
-    perfil = getattr(state, "perfil", "COTRI") or "COTRI"
+    perfil = getattr(state, "perfil", "COAPUB") or "COAPUB"
     acao_rel = f"Redistribuição {perfil}"
+    aura_monitor.iniciar_execucao()   # zera erros/mudanças desta execução
 
     def _prog(atual, total):
         if progresso:
@@ -2799,30 +3041,54 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
             except Exception:
                 pass
 
-    if not caminho:
-        messagebox.showerror("AURA COTRI", "Selecione a planilha de redistribuicao.")
-        return
-    if not caminho_referencias:
-        messagebox.showerror("AURA COTRI", "Selecione o CSV de referencias da redistribuicao.")
-        return
     if not state.url:
-        messagebox.showerror("AURA COTRI", "Informe a URL do sistema.")
+        messagebox.showerror("AURA Distribuição", "Informe a URL do sistema.")
         return
     if not state.usuario or not state.senha:
-        messagebox.showerror("AURA COTRI", "Informe o usuario e a senha.")
+        messagebox.showerror("AURA Distribuição", "Informe o usuario e a senha.")
         return
 
-    status.config(text="Status: Lendo planilha de redistribuicao...")
-    linhas, referencias = ler_redistribuicao(caminho, caminho_referencias)
-    if linhas is None:
-        messagebox.showerror(
-            "AURA COTRI",
-            "Nao foi possivel ler a planilha. Use somente CSV separado por virgulas.",
-        )
-        return
+    # Fonte da fila (Fase 3+4): por padrão, a PLANILHA CENTRAL
+    # (processos_ajuizados) — o tipo vem da coluna Tipo_redistribuicao e a
+    # referência é calculada da própria planilha (número diferente + mesma
+    # competência). O CSV vira alternativa: só é usado se o usuário selecionar
+    # a planilha de redistribuição manualmente.
+    if caminho:
+        if not caminho_referencias:
+            messagebox.showerror(
+                "AURA Distribuição",
+                "Você selecionou uma planilha CSV de redistribuição, então selecione "
+                "também o CSV de referências — ou não selecione CSV nenhum para usar a "
+                "planilha central automaticamente.",
+            )
+            return
+        status.config(text="Status: Lendo planilha de redistribuicao (CSV)...")
+        linhas, referencias = ler_redistribuicao(caminho, caminho_referencias)
+        if linhas is None:
+            messagebox.showerror(
+                "AURA Distribuição",
+                "Nao foi possivel ler a planilha. Use somente CSV separado por virgulas.",
+            )
+            return
+    else:
+        status.config(text="Status: Montando fila da planilha central (processos_ajuizados)...")
+        try:
+            linhas, referencias = fila_redistribuicao_da_planilha()
+        except Exception as e:
+            messagebox.showerror(
+                "AURA Distribuição",
+                "Não foi possível ler a planilha central (Google Sheets):\n\n"
+                f"{e}",
+            )
+            return
 
     if not linhas:
-        messagebox.showinfo("AURA COTRI", "A planilha de redistribuicao esta vazia.")
+        messagebox.showinfo(
+            "AURA Distribuição",
+            "Nenhum processo na fila de redistribuição.\n\n"
+            "Confirme que a planilha central (processos_ajuizados) tem processos — "
+            "ou selecione um CSV manualmente.",
+        )
         return
 
     status.config(text="Status: Buscando competencias no Google Sheets...")
@@ -2832,18 +3098,38 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
 
     pendencias = _validar_planilha_redistribuicao(linhas, referencias)
     if pendencias:
-        messagebox.showerror(
-            "AURA COTRI",
-            "A planilha precisa ser corrigida antes de iniciar a redistribuicao:\n\n"
-            + "\n".join(pendencias[:12])
-            + ("\n..." if len(pendencias) > 12 else ""),
-        )
-        status.config(text="Status: Planilha com pendencias.")
-        return
+        if caminho:
+            # Modo CSV: o usuário pode corrigir o arquivo, então bloqueia o lote.
+            messagebox.showerror(
+                "AURA Distribuição",
+                "A planilha precisa ser corrigida antes de iniciar a redistribuicao:\n\n"
+                + "\n".join(pendencias[:12])
+                + ("\n..." if len(pendencias) > 12 else ""),
+            )
+            status.config(text="Status: Planilha com pendencias.")
+            return
+        else:
+            # Modo planilha central: NÃO bloquear o lote inteiro por causa de
+            # algumas linhas (ex.: processo sem par de mesma competência para
+            # servir de referência). Essas linhas falham/pulam individualmente
+            # no loop; as demais seguem normalmente.
+            logger.warning(
+                "Redistribuição pela planilha central: %d linha(s) com pendência "
+                "(seguirão com tratamento por linha). Exemplos: %s",
+                len(pendencias), "; ".join(pendencias[:5]),
+            )
 
-    caminho_csv = _caminho_csv_resultado(caminho)
+    caminho_csv = (
+        _caminho_csv_resultado(caminho)
+        if caminho
+        else str(OUTPUT_DIR / "redistribuicao_resultados.csv")
+    )
     num_total = len(linhas)
     sucessos = erros = pulados = 0
+    # Blindagem contra duplicidade SÓ no modo planilha central (append-only):
+    # nunca re-redistribuir processo já concluído. No modo CSV manual o usuário
+    # controla o arquivo, então mantemos o comportamento antigo (sem dedup).
+    ja_redistribuidos = set() if caminho else _carregar_processos_ja_minutados(caminho_csv)
 
     try:
         status.config(text="Status: Inicializando Chrome...")
@@ -2856,7 +3142,7 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
 
         if not selecionar_perfil(driver, perfil):
             messagebox.showerror(
-                "AURA COTRI",
+                "AURA Distribuição",
                 f"Nao foi possivel selecionar o perfil {perfil}. "
                 "Verifique se o usuario possui esse perfil de distribuicao no eProc.",
             )
@@ -2875,7 +3161,7 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
             if not verificar_sessao_ativa(driver):
                 status.config(text="Status: Sessão do eProc encerrada — lote interrompido.")
                 messagebox.showerror(
-                    "AURA COTRI",
+                    "AURA Distribuição",
                     "A sessão do eProc expirou ou o navegador foi fechado. "
                     "Faça login novamente e reinicie o lote.",
                 )
@@ -2887,6 +3173,14 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
                     status.config(text=f"[{num_fila}/{num_total}] Sem numero de processo, pulando...")
                     registrar_relatorio_html(f"linha {num_fila}", acao_rel, "WARN",
                                              "Sem número de processo — linha pulada.")
+                    pulados += 1
+                    idx += 1
+                    continue
+
+                if re.sub(r"[^\d]", "", num_processo) in ja_redistribuidos:
+                    status.config(text=f"[{num_fila}/{num_total}] {num_processo} já redistribuído antes — pulando.")
+                    registrar_relatorio_html(num_processo, acao_rel, "WARN",
+                                             "Já redistribuído em execução anterior — pulado (evita duplicidade).")
                     pulados += 1
                     idx += 1
                     continue
@@ -2923,6 +3217,7 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
                 }, _CABECALHO_CSV_REDIST)
                 registrar_relatorio_html(num_processo, f"{acao_rel} - {tipo}", "OK",
                                          mensagem or "Redistribuído com sucesso.")
+                ja_redistribuidos.add(re.sub(r"[^\d]", "", num_processo))
                 sucessos += 1
                 idx += 1
                 _prog(num_fila, num_total)
@@ -2943,6 +3238,7 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
                     "Mensagem": str(e_linha),
                 }, _CABECALHO_CSV_REDIST)
                 erros += 1
+                aura_monitor.notificar_erro(f"{acao_rel} - {tipo_err}", e_linha, num_fila=num_fila)
 
                 decisao = mostrar_erro_linha(num_fila, e_linha, status, contexto=f"Redistribuicao - linha {num_fila}")
 
@@ -2958,7 +3254,7 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
                 if not verificar_sessao_ativa(driver):
                     status.config(text="Status: Sessao do navegador encerrada.")
                     messagebox.showerror(
-                        "AURA COTRI",
+                        "AURA Distribuição",
                         "A sessao do navegador foi encerrada. Inicie o fluxo novamente.",
                     )
                     return
@@ -2977,18 +3273,21 @@ def executar_redistribuicao_cotri(state, status, progresso=None):
         _prog(num_total, num_total)
         status.config(text=f"Status: Redistribuicao concluida! ✅  {sucessos} ok · {erros} erros · {pulados} pulados")
         messagebox.showinfo(
-            "AURA COTRI",
+            "AURA Distribuição",
             f"Redistribuicao finalizada!\n\n"
             f"✅  Concluídos: {sucessos}\n"
             f"❌  Erros:      {erros}\n"
             f"⏭  Pulados:    {pulados}\n\n"
             f"Resultados salvos em:\n{caminho_csv}",
         )
+        _mostrar_relatorio_monitor()
 
     except Exception as e:
         logger.error("Erro geral na redistribuicao: %s", e)
         status.config(text="Erro geral na redistribuicao.")
-        messagebox.showerror("Erro AURA COTRI", str(e))
+        aura_monitor.notificar_erro("Redistribuição (geral)", e)
+        messagebox.showerror("Erro AURA Distribuição", str(e))
+        _mostrar_relatorio_monitor()
 
 
 def _extrair_numero(linha: dict) -> str:
@@ -3323,7 +3622,7 @@ class _StatusComLog:
 class AuraCotriApp(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
-        self.title("AURA COTRI")
+        self.title("AURA Distribuição")
         self.configure(fg_color=COR_BG)
         self.after(200, self._aplicar_icone)
 
@@ -3342,7 +3641,7 @@ class AuraCotriApp(ctk.CTkToplevel):
 
     def _aplicar_icone(self):
         # Define o icone da janela (barra de titulo / barra de tarefas) com a
-        # logo do AURA COTRI. Nunca deve quebrar a abertura caso o arquivo falte.
+        # logo do AURA Distribuição. Nunca deve quebrar a abertura caso o arquivo falte.
 
         # 1) Windows: .ico nativo (melhor na barra de tarefas), se existir.
         try:
@@ -3390,7 +3689,7 @@ class AuraCotriApp(ctk.CTkToplevel):
         logo = self._logo_img((73, 67))
         if logo:
             ctk.CTkLabel(header, image=logo, text="", fg_color="transparent").pack(pady=(16, 0))
-        ctk.CTkLabel(header, text="AURA COTRI",
+        ctk.CTkLabel(header, text="AURA Distribuição",
                      font=ctk.CTkFont("Segoe UI", 28, "bold"),
                      text_color=COR_PRIMARIA).pack()
         ctk.CTkLabel(header, text="Assinatura e Redistribuição de Processos",
@@ -3436,7 +3735,7 @@ class AuraCotriApp(ctk.CTkToplevel):
         senha   = self.entry_senha.get().strip()
         url     = self.entry_url.get().strip()
         if not (usuario and senha and url):
-            messagebox.showerror("AURA COTRI", "Preencha todos os campos.")
+            messagebox.showerror("AURA Distribuição", "Preencha todos os campos.")
             return
         salvar_config(usuario, senha, url)
         self._state = AppState(usuario=usuario, senha=senha, url=url)
@@ -3491,10 +3790,10 @@ class AuraCotriApp(ctk.CTkToplevel):
         if logo2:
             ctk.CTkLabel(topbar, image=logo2, text="",
                          fg_color="transparent").pack(side="left", padx=(12, 4), pady=6)
-        ctk.CTkLabel(topbar, text="AURA COTRI",
+        ctk.CTkLabel(topbar, text="AURA Distribuição",
                      font=ctk.CTkFont("Segoe UI", 13, "bold"),
                      text_color=COR_PRIMARIA).pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(topbar, text="Modulo COTRI/CODIPRE — Assinatura e Redistribuição",
+        ctk.CTkLabel(topbar, text="Distribuição (COMED · COAPRI · COAPUB) — Assinatura e Redistribuição",
                      font=ctk.CTkFont("Segoe UI", 8),
                      text_color=COR_SUBTEXTO).pack(side="left")
         ctk.CTkLabel(topbar, text=f"v{VERSAO_ATUAL}",
@@ -3579,7 +3878,7 @@ class AuraCotriApp(ctk.CTkToplevel):
                 state.caminho_planilha = f
                 lbl_csv.configure(text=os.path.basename(f), text_color=COR_SUCESSO)
 
-        lbl_csv = row_arquivo(s_arq, "PLANILHA CSV", sel_csv)
+        lbl_csv = row_arquivo(s_arq, "PLANILHA CSV (opcional)", sel_csv)
 
         # Perfil
         row_perfil = ctk.CTkFrame(s_arq, fg_color="transparent")
@@ -3587,13 +3886,13 @@ class AuraCotriApp(ctk.CTkToplevel):
         ctk.CTkLabel(row_perfil, text="Perfil de trabalho:",
                      font=ctk.CTkFont("Segoe UI", 9),
                      text_color=COR_SUBTEXTO).pack(side="left", padx=(0, 10))
-        perfil_var = tk.StringVar(value=getattr(state, "perfil", "COTRI") or "COTRI")
+        perfil_var = tk.StringVar(value=getattr(state, "perfil", "COAPUB") or "COAPUB")
 
         def alterar_perfil(*_):
             state.perfil = perfil_var.get()
 
         perfil_var.trace_add("write", alterar_perfil)
-        for p in ("COTRI", "CODIPRE"):
+        for p in ("COMED", "COAPRI", "COAPUB"):
             tk.Radiobutton(row_perfil, text=p, value=p, variable=perfil_var,
                            command=alterar_perfil,
                            font=("Segoe UI", 9, "bold"),
@@ -3603,9 +3902,9 @@ class AuraCotriApp(ctk.CTkToplevel):
                            selectcolor=COR_INPUT_BG,
                            cursor="hand2").pack(side="left", padx=(0, 12))
 
-        # ── ASSINATURA COTRI / CODIPRE ─────────────────────────────────
-        s_ass = secao("ASSINATURA COTRI / CODIPRE")
-        ctk.CTkLabel(s_ass, text="COTRI: PPG  |  CODIPRE: Competência de Direito Privado",
+        # ── MINUTA (Informação) ─────────────────────────────────────────
+        s_ass = secao("MINUTA — INFORMAÇÃO")
+        ctk.CTkLabel(s_ass, text="Cria a minuta 'Informação' (evento de conclusão) e assina. Fila: planilha central (CSV é opcional).",
                      font=ctk.CTkFont("Segoe UI", 8),
                      text_color=COR_BORDA).pack(anchor="w", padx=14, pady=(0, 4))
 
@@ -3617,7 +3916,7 @@ class AuraCotriApp(ctk.CTkToplevel):
                 daemon=True,
             ).start()
 
-        btn(s_ass, "▶  ASSINAR — COTRI / CODIPRE", COR_PRIMARIA, iniciar_assinatura)
+        btn(s_ass, "▶  MINUTAR E ASSINAR", COR_PRIMARIA, iniciar_assinatura)
 
         btn_pausa_ass = ctk.CTkButton(
             s_ass, text="⏸  PAUSAR",
@@ -3639,7 +3938,7 @@ class AuraCotriApp(ctk.CTkToplevel):
 
         # ── REDISTRIBUIÇÃO ─────────────────────────────────────────────
         s_red = secao("REDISTRIBUIÇÃO")
-        ctk.CTkLabel(s_red, text="Abre redistribuição e preenche os campos conforme a planilha",
+        ctk.CTkLabel(s_red, text="Fila e referências vêm da planilha central. Os CSVs abaixo são opcionais (alternativa).",
                      font=ctk.CTkFont("Segoe UI", 8),
                      text_color=COR_BORDA).pack(anchor="w", padx=14, pady=(0, 4))
 
@@ -3655,8 +3954,8 @@ class AuraCotriApp(ctk.CTkToplevel):
                 state.caminho_referencias_redistribuicao = f
                 lbl_refs.configure(text=os.path.basename(f), text_color=COR_SUCESSO)
 
-        lbl_redist = row_arquivo(s_red, "PLANILHA REDISTRIBUIÇÃO", sel_redist)
-        lbl_refs   = row_arquivo(s_red, "CSV REFERÊNCIAS", sel_refs)
+        lbl_redist = row_arquivo(s_red, "PLANILHA REDISTRIBUIÇÃO (opcional)", sel_redist)
+        lbl_refs   = row_arquivo(s_red, "CSV REFERÊNCIAS (opcional)", sel_refs)
 
         def iniciar_redistribuicao():
             self.progress.set(0)

@@ -185,7 +185,7 @@ def capturar_dados_finais(driver, wait, aviso="", assunto=""):
             "Chave": chave.strip(),
             "Aviso": aviso,
             "Competência": NOME_COMPETENCIA,
-            # Alimentam o AURA COTRI (ver ESTUDO_AURA_COTRI.md):
+            # Alimentam o AURA COTRI (ver docs/ESTUDO_AURA_COTRI.md):
             # Assunto vem da linha da competência; Tipo_redistribuicao é
             # atribuído em rodízio pelos 12 tipos.
             "Assunto": (assunto or "").strip(),
@@ -1371,8 +1371,26 @@ def selecionar_pdf():
 # selecionar_planilha removida — competências carregadas do Google Sheets
 
 
+def _compartilhar_login_com_gabinete():
+    """Garante que o aura_config.json (lido pelo Gabinete) tenha o mesmo
+    usuario/senha/url da tela inicial. Faz merge para não apagar a chave de IA
+    já salva. Nunca lança exceção: se falhar, o Gabinete usa os planos B."""
+    try:
+        caminho = os.path.join(_pasta_config_externa(), ARQUIVO_CONFIG)
+        dados = {}
+        if os.path.exists(caminho):
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        dados.update({"usuario": USUARIO, "senha": SENHA, "url": URL})
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(dados, f)
+    except Exception:
+        pass
+
+
 def abrir_aura_gabinete():
     try:
+        _compartilhar_login_com_gabinete()
         _auragabinete.AppGUI(janela)
     except Exception as e:
         messagebox.showerror("AURA Gabinete", f"Erro ao abrir o Gabinete:\n\n{e}")
@@ -1397,7 +1415,7 @@ def abrir_aura_cotri():
         _compartilhar_login_com_aura_cotri()
         _run_cotri.AuraCotriApp(janela)
     except Exception as e:
-        messagebox.showerror("AURA COTRI", f"Erro ao abrir o AURA COTRI:\n\n{e}")
+        messagebox.showerror("AURA Distribuição", f"Erro ao abrir o AURA Distribuição:\n\n{e}")
 
 
 def _compartilhar_login_com_aura_eventoscamaracivel():
@@ -2745,7 +2763,7 @@ class AuraApp(ctk.CTk):
         # INTEGRAÇÃO
         c_int = card(col_esq, "🧭  INTEGRAÇÃO", COR_PRIMARIA)
         abtn(c_int, "🧭  AURA GABINETE", COR_PRIMARIA, abrir_aura_gabinete)
-        abtn(c_int, "🧭  AURA COTRI", COR_ROXO, abrir_aura_cotri)
+        abtn(c_int, "🧭  AURA Distribuição", COR_ROXO, abrir_aura_cotri)
         abtn(c_int, "⚖️  AURA EVENTOS CÂMARA CÍVEL", COR_ROXO, abrir_aura_eventoscamaracivel)
         abtn(c_int, "🗳️  AURA SESSÃO DE JULGAMENTO", COR_ROXO, abrir_aura_sessaojulgamento)
 
@@ -2866,7 +2884,7 @@ class AuraApp(ctk.CTk):
         ctk.CTkLabel(
             jan,
             text="Vai rodar o pipeline completo contra HOMOLOGAÇÃO:\n"
-                 "1. COTRI distribui  2. GABINETE minuta + remessa\n"
+                 "1. Distribuição distribui  2. GABINETE minuta + remessa\n"
                  "3. MAGISTRADO assina (login descoberto automaticamente)\n"
                  "4. CARTÓRIO intima  5. ADVOGADO responde\n\n"
                  "Isso cria e assina uma minuta de teste de verdade, e\n"

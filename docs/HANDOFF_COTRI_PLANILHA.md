@@ -1,8 +1,8 @@
 # Handoff — AURA COTRI via planilha + troca de credenciais Google
 
 > Resumo para continuar em outra sessão do Claude Code. No início da nova
-> sessão: "leia o HANDOFF_COTRI_PLANILHA.md e o ESTUDO_AURA_COTRI.md na raiz
-> antes de continuar". Branch de trabalho: `claude/sleepy-bohr-slls1p`.
+> sessão: "leia o HANDOFF_COTRI_PLANILHA.md e o ESTUDO_AURA_COTRI.md na pasta
+> docs/ antes de continuar". Branch de trabalho: `claude/sleepy-bohr-slls1p`.
 > Última atualização: 2026-09-14.
 
 ## Objetivo geral
@@ -32,7 +32,7 @@ Detalhes do plano em `ESTUDO_AURA_COTRI.md`.
 3. `Tipo_redistribuicao` em **rodízio cíclico** pelos 12 tipos.
 4. Minuta por **peticionamento** (não por "preferência" do setor): evento e
    tipo de documento **fixos** → Tipo de documento `Documento de informação`,
-   evento `Conclusos os autos para decisão com revisão de autuação (51)`.
+   evento `Conclusos para decisão com revisão de autuação (51)`.
 5. Setores de distribuição mudaram: agora são **3** — COAPUB (Pública),
    COAPRI (Privada), COMED (Medidas Urgentes, ex-CODIPRE). Seleção por **nome
    completo** do setor. Qual setor usar = escolha do usuário (sem mapa
@@ -85,22 +85,17 @@ Detalhes do plano em `ESTUDO_AURA_COTRI.md`.
   recompilar com `pyinstaller AURA.spec` e pôr `aura_sheets.json` na pasta
   `dist`). O armazenamento (86%) NÃO era a causa.
 
-## BLOQUEIO ATUAL (próximo passo)
+## Competências — RESOLVIDO (2026-09-15)
 
-A **planilha de competências nova está vazia** (só a aba `EXEMPLO_competencia`).
-As competências reais estavam na planilha do **AURA antigo**
-(ID `19BgcXguj02yI5uthWW7TBj4v22da9EAl3ZmtOU6UEu8`). Sem elas o peticionamento
-não tem o que processar (é por isso que o teste real ainda não rodou).
+O usuário apontou o `spreadsheet_id_competencias` (no `aura_sheets.json`) para
+a **planilha de competências do AURA antigo**, que tem os dados reais, e a
+**compartilhou com a conta de serviço como Editor**. Ou seja, o robô já lê as
+competências reais — o bloqueio que impedia o teste real de peticionamento
+está superado.
 
-**A resolver com o usuário:** ele vai tentar abrir a planilha antiga
-(`https://docs.google.com/spreadsheets/d/19BgcXguj02yI5uthWW7TBj4v22da9EAl3ZmtOU6UEu8/edit`).
-- Se abrir → compartilhar com a conta de serviço (Leitor) e apontar
-  `spreadsheet_id_competencias` no `aura_sheets.json` para esse ID (ou fazer
-  uma cópia e usar o ID da cópia).
-- Se não abrir → localizar backup/cópia das competências e importar.
-
-Obs.: a aba `EXEMPLO_competencia` será usada só para a redistribuição, não
-para o peticionamento.
+**Próximo passo:** rodar um peticionamento real de teste e conferir na aba
+`processos_ajuizados` as colunas `Assunto` e `Tipo_redistribuicao` preenchidas
+(valida a Fase 1 de ponta a ponta).
 
 ## Como testar o peticionamento (depois de resolver as competências)
 
