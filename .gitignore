@@ -29,3 +29,6 @@ dist/
 
 # Claude Code
 .claude/
+
+# Chaves de API (usar aura_api_padrao.example.json como modelo)
+aura_api_padrao.json
