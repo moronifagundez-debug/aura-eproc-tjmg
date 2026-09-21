@@ -90,8 +90,8 @@ _TEXTO_MINUTA_TESTE_REGRESSAO = (
     "[TESTE DE REGRESSÃO AURA -- NÃO É UMA DECISÃO REAL]"
 )
 
-USUARIO = "MG123456"
-SENHA = "Senha*123456"
+USUARIO = os.environ.get("AURA_USUARIO", "")
+SENHA = os.environ.get("AURA_SENHA", "")
 URL = "https://eproc2g-hml.tjmg.jus.br/eproc/"
 PAUSADO = False
 lbl_strip_comp = None
