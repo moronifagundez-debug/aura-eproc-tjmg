@@ -346,7 +346,10 @@ EVENTOS_REMESSA = [
 # ══════════════════════════════════════════════
 # Configurações
 # ══════════════════════════════════════════════
-URL_EPROC_GABINETE   = "https://eproc2g-hml.tjmg.jus.br/versao/"
+# Planos B (usados só quando o Gabinete roda AVULSO, sem passar pela tela
+# inicial). O normal é herdar usuario/senha/url do aura_config.json (a mesma
+# fonte da tela inicial do AURA Principal) — ver carregar_config() abaixo.
+URL_EPROC_GABINETE_PADRAO = "https://eproc2g-hml.tjmg.jus.br/eproc/"
 if hasattr(sys, "_MEIPASS"):
     PASTA_SCRIPT = os.path.dirname(sys.executable)
 elif os.environ.get("AURA_BASE_DIR"):
@@ -354,8 +357,8 @@ elif os.environ.get("AURA_BASE_DIR"):
 else:
     PASTA_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 VERSAO_GABINETE      = "9.21"
-USUARIO_EPROC        = "MG123456"
-SENHA_EPROC          = "Senha*123456"
+USUARIO_EPROC_PADRAO = "MG123456"
+SENHA_EPROC_PADRAO   = "Senha*123456"
 TIMEOUT            = 15
 TIMEOUT_LONGO      = 45
 
@@ -373,17 +376,47 @@ def _base_path(filename: str) -> str:
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), filename)
 
 
+def _caminhos_config() -> list:
+    """Locais candidatos do aura_config.json, em ordem de prioridade. Cobre o
+    .exe (ao lado do executável), o subprocesso lançado pelo AURA (AURA_BASE_DIR)
+    e a execução por código-fonte (raiz do projeto — este arquivo mora em
+    integrations/, por isso sobe um nível)."""
+    cands = []
+    if os.environ.get("AURA_BASE_DIR"):
+        cands.append(os.path.join(os.environ["AURA_BASE_DIR"], "aura_config.json"))
+    cands.append(os.path.join(PASTA_SCRIPT, "aura_config.json"))
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cands.append(os.path.join(raiz, "aura_config.json"))
+    vistos, unicos = set(), []
+    for c in cands:
+        if c not in vistos:
+            vistos.add(c)
+            unicos.append(c)
+    return unicos
+
+
+def carregar_config() -> dict:
+    """Lê usuario/senha/url do aura_config.json — a MESMA fonte da tela inicial
+    do AURA Principal. É isso que faz o Gabinete usar sempre o mesmo endereço e o
+    mesmo usuário definidos na tela inicial. Sem config, devolve {} (aí valem os
+    planos B *_PADRAO)."""
+    for caminho in _caminhos_config():
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return {}
+
+
 def _carregar_groq_key() -> str:
     """Lê a chave da IA do aura_config.json (mesmo arquivo usado pelo AURA principal).
     Se ainda não houver chave salva, usa a chave padrão embutida no próprio .exe."""
-    try:
-        caminho = os.path.join(PASTA_SCRIPT, "aura_config.json")
-        with open(caminho, "r", encoding="utf-8") as f:
-            chave = json.load(f).get("groq_key", "")
-            if chave:
-                return chave
-    except Exception:
-        pass
+    chave = carregar_config().get("groq_key", "")
+    if chave:
+        return chave
     try:
         with open(_base_path("aura_api_padrao.json"), "r", encoding="utf-8") as f:
             return json.load(f).get("groq_key", "")
@@ -561,7 +594,7 @@ class EprocBotV4:
     # ──────────────────────────────────────────
     # PASSO 1 — Abrir navegador
     # ──────────────────────────────────────────
-    def abrir_navegador(self):
+    def abrir_navegador(self, url: str = None):
         options = Options()
         options.add_argument("--start-maximized")
         options.add_argument("--disable-blink-features=AutomationControlled")
@@ -573,7 +606,8 @@ class EprocBotV4:
 
         self.wait = WebDriverWait(self.driver, TIMEOUT)
         self.wait_longo = WebDriverWait(self.driver, TIMEOUT_LONGO)
-        self.driver.get(URL_EPROC_GABINETE)
+        self.url = (url or URL_EPROC_GABINETE_PADRAO).strip()
+        self.driver.get(self.url)
         self._janela_principal = self.driver.current_window_handle
         self.log("Site aberto. Faça login + escolha o perfil, depois clique em '② Confirmar Login'.")
 
@@ -592,6 +626,108 @@ class EprocBotV4:
                            and "acao=principal" in d.current_url)
         )
         self.log("✓ Login realizado.")
+
+    # ──────────────────────────────────────────
+    # Seleção automática de perfil (tela "Seleção de perfil")
+    # ──────────────────────────────────────────
+    @staticmethod
+    def _norm_perfil(texto: str) -> str:
+        """Normaliza para casar perfis: minúsculo, sem acento, SEM o código entre
+        parênteses (ex.: '(1SCIV-A3)') e SEM zeros à esquerda em números (assim
+        '01ª CÂMARA' casa com '1ª Câmara'). Remover o código evita falso-positivo
+        (o número do código poderia satisfazer, ex., o 'Assento 1' do alvo)."""
+        s = EprocBotV4._normalizar(texto or "")
+        s = re.sub(r"\([^)]*\)", " ", s)    # remove (1SCIV-A3), (12CACIV-A4), ...
+        s = re.sub(r"\b0+(\d)", r"\1", s)   # 01 -> 1, 010 -> 10
+        return re.sub(r"\s+", " ", s).strip()
+
+    def _clicar_botao_perfil(self, botao):
+        onclick = botao.get_attribute("onclick") or ""
+        m = re.search(r"acaoLogar\(['\"](\d+)['\"]\)", onclick)
+        if m:
+            self.driver.execute_script(f"acaoLogar('{m.group(1)}');")
+        else:
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", botao)
+            time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", botao)
+
+    def selecionar_perfil(self, alvo: str, tentativas: int = 20, intervalo: float = 1.0) -> bool:
+        """Na tela 'Seleção de perfil', clica no perfil do gabinete cujo
+        câmara/assento casa com `alvo`. Casa pelos NÚMEROS (nº da câmara/seção +
+        assento) e pela FAMÍLIA (Câmara vs Seção), ignorando as palavras — assim
+        'Câmara Cível' casa com 'CACIV', mas '1ª' NÃO casa com '11ª' e
+        'Assento 1' NÃO casa com 'Assento 3'. Prioriza 'GERENTE GABINETE'.
+        Retorna True se selecionou; False se não achou ou se ficou ambíguo (o
+        chamador então pede seleção manual — nunca chuta um perfil)."""
+        def _tokens(s: str) -> list:
+            return re.findall(r"[a-z]+|\d+", self._norm_perfil(s))
+
+        def _nums(s: str) -> list:
+            return [t for t in _tokens(s) if t.isdigit()]
+
+        def _familia(s: str) -> str:
+            toks = set(_tokens(s))
+            if toks & {"secao", "sciv"}:
+                return "S"
+            if toks & {"camara", "caciv", "caciveesp"}:
+                return "C"
+            return ""
+
+        alvo_nums = _nums(alvo)
+        alvo_fam = _familia(alvo)
+        if not alvo_nums:
+            # Sem números não dá para identificar o gabinete com segurança.
+            self.log(f"Alvo de perfil sem números ('{alvo}') — seleção manual.", nivel="WARN")
+            return False
+
+        def _prio(texto: str) -> int:
+            return 2 if "gerente gabinete" in self._norm_perfil(texto) else 0
+
+        def _compat(texto: str) -> bool:
+            if _nums(texto) != alvo_nums:            # câmara/assento têm que bater
+                return False
+            fam = _familia(texto)
+            if alvo_fam and fam and alvo_fam != fam:  # não confundir Câmara com Seção
+                return False
+            return True
+
+        def _rotulo(b) -> str:
+            return (b.get_attribute("data-descricao") or (b.text or "").splitlines()[0] or "").strip()
+
+        time.sleep(1)
+        for _ in range(tentativas):
+            try:
+                todos = self.driver.find_elements(
+                    By.XPATH, '//button[contains(@class,"list-group-item")]')
+            except Exception:
+                todos = []
+            # Casa contra data-descricao OU texto visível (Lotação).
+            candidatos = [
+                b for b in todos
+                if _compat(b.get_attribute("data-descricao") or "") or _compat(b.text or "")
+            ]
+            if candidatos:
+                candidatos.sort(
+                    key=lambda b: _prio((b.get_attribute("data-descricao") or "") + " " + (b.text or "")),
+                    reverse=True,
+                )
+                # Se sobrar mais de um perfil com a MESMA prioridade, é ambíguo:
+                # não arrisca escolher o gabinete errado.
+                top = _prio((candidatos[0].get_attribute("data-descricao") or "") + " " + (candidatos[0].text or ""))
+                empatados = [b for b in candidatos
+                             if _prio((b.get_attribute("data-descricao") or "") + " " + (b.text or "")) == top]
+                if len(empatados) > 1:
+                    self.log(
+                        "Mais de um perfil casou com o alvo — ambíguo, seleção manual: "
+                        + " | ".join(_rotulo(b) for b in empatados[:4]),
+                        nivel="WARN")
+                    return False
+                self.log(f"Perfil encontrado: {_rotulo(candidatos[0])}")
+                self._clicar_botao_perfil(candidatos[0])
+                time.sleep(4)
+                return True
+            time.sleep(intervalo)
+        return False
 
     def fechar_navegador(self):
         if self.driver:
@@ -669,49 +805,107 @@ class EprocBotV4:
     # PASSO 4 — Abrir Nova Minuta
     # ──────────────────────────────────────────
     def abrir_nova_minuta(self):
-        """
-        Caminho oficial (manual p.125): Ctrl+M (confirmado).
-        Fallback robusto: clicar em #btn-minutar.
-        Eproc abre em nova aba quando sin_abrir_link_janela=S; se vier na mesma aba, segue normalmente.
-        """
-        janelas_antes = len(self.driver.window_handles)
+        """Abre a tela de Nova Minuta (acao=minuta_cadastrar).
 
+        Robustez (2026-09-18): a versão antiga dependia de
+        `number_of_windows_to_be(2)` — contagem fixa de janelas. Em lote, se
+        sobrava uma aba de minuta anterior (ou o Ctrl+M abria junto com o botão),
+        ficavam 3 janelas e a espera por "exatamente 2" nunca acontecia,
+        estourando TimeoutException com "Message:" vazio — mesmo com a minuta já
+        aberta. Agora a gente NÃO conta janelas: procura, entre TODAS as abas
+        abertas, aquela cuja URL contém `minuta_cadastrar` e troca pra ela.
+        Prioriza o clique em #btn-minutar (que faz window.open, como a página
+        realmente faz); Ctrl+M vira reserva."""
+        # A aba atual é a do processo (capa). Guarda como principal para o retorno.
         try:
-            self._atalho("ctrl", "m", "Nova minuta")
-            time.sleep(2)
-            if len(self.driver.window_handles) > janelas_antes:
-                self._trocar_para_nova_aba()
-                self.log("Nova Minuta aberta em nova aba (Ctrl+M).")
-                self._aguardar_url_conter("minuta_cadastrar", timeout=10)
-                return
-            # Mesma aba — verifica se a URL mudou
-            try:
-                self._aguardar_url_conter("minuta_cadastrar", timeout=3)
-                self.log("Nova Minuta aberta na mesma aba (Ctrl+M).")
-                return
-            except TimeoutException:
-                pass
-        except Exception as e:
-            self.log(f"Ctrl+M não disparou: {e}", nivel="WARN")
+            self._janela_principal = self.driver.current_window_handle
+        except Exception:
+            pass
 
-        # Fallback: clicar btn-minutar
-        self.log("Tentando fallback: clicar #btn-minutar...")
+        # Fecha abas de minuta REMANESCENTES de um processo anterior — se
+        # sobrarem, atrapalham a detecção e, pior, poderiam confundir com a
+        # minuta certa (aba de OUTRO processo). Nunca fecha a aba principal.
         try:
-            btn = self._aguardar_clicavel(By.ID, "btn-minutar", timeout=5)
-            btn.click()
-        except (TimeoutException, NoSuchElementException):
+            for h in list(self.driver.window_handles):
+                if h == self._janela_principal:
+                    continue
+                try:
+                    self.driver.switch_to.window(h)
+                    if "minuta_cadastrar" in (self.driver.current_url or ""):
+                        self.driver.close()
+                except Exception:
+                    pass
+            self.driver.switch_to.window(self._janela_principal)
+        except Exception:
+            pass
+
+        handles_antes = set(self.driver.window_handles)
+
+        def _ir_para_minuta(timeout: float = 12.0) -> bool:
+            """Troca para a aba/janela cuja URL contém minuta_cadastrar (nova aba
+            ou a própria). Retorna True se chegou lá."""
+            fim = time.time() + timeout
+            while time.time() < fim:
+                # Nova(s) aba(s) aberta(s) depois da ação
+                for h in [h for h in self.driver.window_handles if h not in handles_antes]:
+                    try:
+                        self.driver.switch_to.window(h)
+                        if "minuta_cadastrar" in (self.driver.current_url or ""):
+                            return True
+                    except Exception:
+                        continue
+                # Ou abriu na MESMA aba (principal)
+                try:
+                    if self._janela_principal in self.driver.window_handles:
+                        self.driver.switch_to.window(self._janela_principal)
+                        if "minuta_cadastrar" in (self.driver.current_url or ""):
+                            return True
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            return False
+
+        # 1) Caminho preferido: clicar no botão Minutar (window.open _blank).
+        clicou = False
+        try:
+            btn = self._aguardar_clicavel(By.ID, "btn-minutar", timeout=8)
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
             try:
-                link = self.driver.find_element(
-                    By.XPATH, "//a[normalize-space(text())='Nova' and contains(@title,'Nova Minuta')]")
-                link.click()
+                btn.click()
             except Exception:
-                self._tratar_alert()
-                raise NoSuchElementException("Botão 'Minutar' não encontrado na capa.")
-        time.sleep(2)
-        if len(self.driver.window_handles) > janelas_antes:
-            self._trocar_para_nova_aba()
-        self._aguardar_url_conter("minuta_cadastrar", timeout=10)
-        self.log("Nova Minuta aberta.")
+                self.driver.execute_script("arguments[0].click();", btn)
+            clicou = True
+        except (TimeoutException, NoSuchElementException):
+            self.log("#btn-minutar não encontrado — tentando Ctrl+M...", nivel="WARN")
+
+        # 2) Se o botão não estava disponível, tenta o atalho Ctrl+M.
+        if not clicou:
+            try:
+                self._atalho("ctrl", "m", "Nova minuta")
+            except Exception as e:
+                self.log(f"Ctrl+M não disparou: {e}", nivel="WARN")
+
+        if _ir_para_minuta(timeout=12):
+            self.log("Nova Minuta aberta.")
+            return
+
+        # 3) Última tentativa: volta à principal e tenta o atalho de novo.
+        try:
+            if self._janela_principal in self.driver.window_handles:
+                self.driver.switch_to.window(self._janela_principal)
+            self._atalho("ctrl", "m", "Nova minuta (retry)")
+        except Exception:
+            pass
+        if _ir_para_minuta(timeout=10):
+            self.log("Nova Minuta aberta (retry).")
+            return
+
+        self._tratar_alert()
+        raise NoSuchElementException(
+            "Não consegui abrir a Nova Minuta: nem o botão 'Minutar' nem Ctrl+M "
+            "levaram à tela minuta_cadastrar (verifique se a capa do processo "
+            "estava aberta e se há pop-up bloqueando)."
+        )
 
     def _trocar_para_nova_aba(self, timeout: int = 10):
         WebDriverWait(self.driver, timeout).until(EC.number_of_windows_to_be(2))
@@ -964,6 +1158,28 @@ class EprocBotV4:
 
     def selecionar_assinante(self, assinante: str):
         self._selecionar_dropdown("selAssinante", assinante, "Assinante")
+
+    def selecionar_assinante_criador(self) -> bool:
+        """Seleciona o assinante = 'Usuário criador da minuta' (option value='1')
+        de forma robusta: primeiro por value, depois por texto. Retorna True se
+        conseguiu — o eProc exige um assinante indicado para prosseguir."""
+        try:
+            sel = self._aguardar_elemento(By.ID, "selAssinante", timeout=8)
+            select = Select(sel)
+            try:
+                select.select_by_value("1")
+                self.log("Assinante: Usuário criador da minuta (value=1).")
+                return True
+            except Exception:
+                pass
+            for opt in select.options:
+                if "criador da minuta" in self._normalizar(opt.text):
+                    select.select_by_visible_text(opt.text)
+                    self.log(f"Assinante: {opt.text}")
+                    return True
+        except Exception as e:
+            self.log(f"Não consegui selecionar o assinante criador: {e}", nivel="WARN")
+        return False
 
     # Mapa de tratamentos por value do select
     _TRATAMENTOS = {
@@ -5833,6 +6049,13 @@ class EprocBotV4:
                 self.assinar_com_senha(dados["senha"])
             except Exception as e:
                 return False, f"Falha ao assinar: {str(e)[:200]}"
+            # A minuta abre em nova aba; após assinar, a aba costuma fechar. Volta
+            # à aba principal para o próximo processo da fila não pesquisar numa
+            # aba inválida.
+            try:
+                self._voltar_para_aba_principal()
+            except Exception:
+                pass
         return True, "OK"
 
 class AppGUI(ctk.CTkToplevel):
@@ -6614,12 +6837,42 @@ tr.ok td{{background:#0d1f12;}} tr.warn td{{background:#1f1a0d;}} tr.error td{{b
             return
 
         def _go():
+            # Herda endereço e usuário da tela inicial (aura_config.json). Os
+            # planos B *_PADRAO só valem se o Gabinete rodar avulso, sem config.
+            cfg = carregar_config()
+            url     = (cfg.get("url")     or URL_EPROC_GABINETE_PADRAO).strip()
+            usuario = (cfg.get("usuario") or USUARIO_EPROC_PADRAO).strip()
+            senha   = (cfg.get("senha")   or SENHA_EPROC_PADRAO)
             self._set_passo("Abrindo navegador...", 0.05)
-            self.bot.abrir_navegador()
+            self.bot.abrir_navegador(url)
             self._set_passo("Realizando login...", 0.2)
-            self.bot.fazer_login(USUARIO_EPROC, SENHA_EPROC)
-            self._set_passo(f"Pronto — {self.perfil_ativo.split(' - ')[0].strip()}", 0.4)
-            self._log("✓ Login concluído. Clique em Minutar para iniciar.")
+            self.bot.fazer_login(usuario, senha)
+
+            # Seleciona o perfil automaticamente (como o AURA Distribuição), em
+            # vez de parar na tela "Seleção de perfil". O gabinete escolhido
+            # (self.perfil_ativo) vem como "MAGISTRADO - Câmara - Assento"; o que
+            # identifica o perfil no eProc é a parte da câmara/assento (após o
+            # nome do magistrado).
+            partes = [p.strip() for p in (self.perfil_ativo or "").split(" - ")]
+            alvo_perfil = " - ".join(partes[1:]).strip() if len(partes) > 1 else (self.perfil_ativo or "").strip()
+            self._set_passo(f"Selecionando perfil do gabinete ({alvo_perfil})...", 0.3)
+            if alvo_perfil and self.bot.selecionar_perfil(alvo_perfil):
+                # NÃO sobrescreve self.perfil_ativo: ele guarda o MAGISTRADO, usado
+                # para filtrar a fila. Aqui só confirmamos/logamos o perfil eProc.
+                try:
+                    ativo = self.bot.confirmar_login().get("ativo", "")
+                    if ativo:
+                        self._log(f"Perfil eProc ativo: {ativo}")
+                except Exception as e:
+                    self._log(f"(perfil selecionado; confirmação do combobox falhou: {e})", nivel="WARN")
+                self._set_passo("Pronto — perfil selecionado", 0.4)
+                self._log(f"✓ Perfil do gabinete selecionado automaticamente ({alvo_perfil}). Clique em Minutar.")
+            else:
+                self._set_passo("Selecione o perfil manualmente e clique em '② Confirmar Login'.", 0.35)
+                self._log(
+                    "⚠ Não consegui achar o perfil do gabinete automaticamente para "
+                    f"'{alvo_perfil}'. Escolha o perfil na tela do eProc e clique em "
+                    "'② Confirmar Login'.", nivel="WARN")
 
         self._run_thread(_go, action_name="Abrir e Logar")
 

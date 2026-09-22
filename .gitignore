@@ -1,6 +1,7 @@
 # Credenciais e configurações sensíveis
 aura_credentials.json
 aura_config.json
+aura_sheets.json
 
 # Python
 __pycache__/

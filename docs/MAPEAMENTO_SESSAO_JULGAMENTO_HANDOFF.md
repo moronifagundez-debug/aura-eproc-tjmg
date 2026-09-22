@@ -3,7 +3,7 @@
 > Documento gerado em 2026-08-26 pra continuar este trabalho em outra
 > máquina/sessão do Claude Code. Cole/aponte este arquivo pra sessão nova
 > logo no início ("lê o arquivo MAPEAMENTO_SESSAO_JULGAMENTO_HANDOFF.md
-> na raiz do projeto antes de continuar"). Tudo abaixo veio da memória
+> na pasta docs/ antes de continuar"). Tudo abaixo veio da memória
 > local desta máquina (`.claude/projects/.../memory/`), que NÃO
 > sincroniza entre computadores — por isso este arquivo existe.
 

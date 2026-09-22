@@ -23,6 +23,7 @@ from aura_db import (
     gravar_historico_intermediario,
     ler_historico_intermediario,
     inicializar_planilha,
+    proximo_tipo_redistribuicao,
 )
 from aura_sheet_selector import SheetSelectorFrame
 from aura_infra import (
@@ -154,6 +155,8 @@ def salvar_no_historico(dados):
         chave=dados.get("Chave", ""),
         aviso=dados.get("Aviso", ""),
         competencia=dados.get("Competência", ""),
+        assunto=dados.get("Assunto", ""),
+        tipo_redistribuicao=dados.get("Tipo_redistribuicao", ""),
     )
 
 
@@ -168,7 +171,7 @@ def salvar_historico_intermediario(dados):
     )
 
 
-def capturar_dados_finais(driver, wait, aviso=""):
+def capturar_dados_finais(driver, wait, aviso="", assunto=""):
     try:
         num_processo = wait.until(EC.presence_of_element_located((By.ID, "lblDesNumProcesso"))).text
         classe = driver.find_element(By.ID, "lblDesClasse").text
@@ -182,21 +185,55 @@ def capturar_dados_finais(driver, wait, aviso=""):
             "Chave": chave.strip(),
             "Aviso": aviso,
             "Competência": NOME_COMPETENCIA,
+            # Alimentam o AURA COTRI (ver docs/ESTUDO_AURA_COTRI.md):
+            # Assunto vem da linha da competência; Tipo_redistribuicao é
+            # atribuído em rodízio pelos 12 tipos.
+            "Assunto": (assunto or "").strip(),
+            "Tipo_redistribuicao": proximo_tipo_redistribuicao(),
         }
         salvar_no_historico(dados)
         return dados
-    except:
+    except Exception as e:
+        # Antes este except era mudo e escondia falhas de gravação na planilha
+        # (petição concluía, mas nada era registrado e nenhum erro aparecia).
+        # Agora registra a causa: aparece no console (python aura.py) e num log
+        # ao lado do executável, para diagnóstico.
+        import traceback
+        msg = f"[aura] Falha ao capturar/gravar dados finais na planilha: {e}"
+        print(msg)
+        traceback.print_exc()
+        try:
+            caminho_log = os.path.join(_pasta_config_externa(), "aura_gravacao_planilha.log")
+            with open(caminho_log, "a", encoding="utf-8") as _f:
+                _f.write(time.strftime("%d/%m/%Y %H:%M:%S") + "  " + msg + "\n")
+                _f.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
         return None
 
 
-def clicar_seguro(driver, wait, xpath):
+def clicar_seguro(driver, wait, xpath, obrigatorio=False):
+    """Clica num elemento localizado por XPath.
+
+    obrigatorio=True para cliques criticos (abertura da Peticao Inicial,
+    barra de acao): nesses casos a falha levanta RuntimeError em vez de so
+    imprimir um aviso. Falhar em silencio fazia o robo seguir o fluxo numa
+    tela errada, e o problema so aparecia muito depois -- tipicamente como
+    "selecao errada" na Tela 1, sem nenhuma pista da causa real.
+
+    Retorna True se clicou, False se falhou e nao era obrigatorio.
+    """
     try:
         elemento = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
         time.sleep(0.5)
         driver.execute_script("arguments[0].click();", elemento)
+        return True
     except Exception as e:
+        if obrigatorio:
+            raise RuntimeError(f"Clique obrigatorio falhou em {xpath}: {e}") from e
         print(f"[aura] Aviso: clicar_seguro falhou em {xpath}: {e}")
+        return False
 
 
 def aceitar_alertas_pendentes(driver, tentativas=3):
@@ -850,12 +887,24 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
         driver.find_element(By.ID, "pwdSenha").send_keys(SENHA)
         clicar_seguro(driver, wait, '//*[@id="sbmEntrar"]')
 
-        # PERFIL
-        if perfil_cinprot:
-            clicar_seguro(driver, wait, '//*[@data-descricao="DIRETOR DISTRIBUIÇÃO / CINPROT"]')
-        else:
-            clicar_seguro(driver, wait, '//*[@id="tr1"]')
-        clicar_seguro(driver, wait, '//*[@id="action-bar"]/a[1]')
+        # PERFIL -- busca o perfil pelo TEXTO, nunca por posicao fixa.
+        # O clique em '//*[@id="tr1"]' (primeira linha da lista) so funcionava
+        # enquanto a conta tinha poucos perfis; depois que ela ganhou dezenas
+        # de lotacoes de GABINETE/SECRETARIA a primeira linha deixou de ser
+        # ADVOGADO, e o robo passava a peticionar logado no perfil errado.
+        # Isso aparecia adiante como "selecao errada" na Tela 1, porque o
+        # <select> selIdGrupoCompetencia vem populado conforme o perfil ativo
+        # e a planilha guarda POSICAO (POS n), nao o nome da competencia.
+        # Mesma correcao ja aplicada no peticionamento intermediario.
+        perfil_alvo = "DIRETOR DISTRIBUIÇÃO / CINPROT" if perfil_cinprot else "ADVOGADO"
+        status.configure(text=f"Status: Selecionando perfil {perfil_alvo}...")
+        if not _run_cotri.selecionar_perfil(driver, perfil_alvo):
+            raise RuntimeError(
+                f"Nao foi possivel selecionar o perfil {perfil_alvo}. "
+                "Verifique se a conta tem esse perfil na tela de Selecao de Perfil."
+            )
+        print(f"[aura] Perfil selecionado: {perfil_alvo}")
+        clicar_seguro(driver, wait, '//*[@id="action-bar"]/a[1]', obrigatorio=True)
 
         linhas_lista = DADOS_COMPETENCIA
         idx = 0
@@ -870,7 +919,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                 try:
                     time.sleep(2)
                     wait.until(EC.presence_of_element_located((By.XPATH, "//a[@aria-label='Petição Inicial']")))
-                    clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']")
+                    clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']", obrigatorio=True)
 
                     id_area = int(linha['AREA'].split("POS ")[-1])
                     id_classe = int(linha['Classeprocessual'].split("POS ")[-1])
@@ -1274,7 +1323,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     # Coleta avisos registrados durante o peticionamento
                     aviso_final = " | ".join(_ultimo_aviso) if _ultimo_aviso else ""
                     _ultimo_aviso.clear()
-                    capturar_dados_finais(driver, wait, aviso_final)
+                    capturar_dados_finais(driver, wait, aviso_final, assunto=assunto)
                     # Tenta btnNovaPeticao, senão vai pelo menu
                     try:
                         btn = driver.find_elements(By.ID, "btnNovaPeticao")
@@ -1285,7 +1334,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     except:
                         time.sleep(1)
                         wait.until(EC.presence_of_element_located((By.XPATH, "//a[@aria-label='Petição Inicial']")))
-                        clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']")
+                        clicar_seguro(driver, wait, "//a[@aria-label='Petição Inicial']", obrigatorio=True)
                     time.sleep(2)
                     idx += 1
 
@@ -1348,8 +1397,26 @@ def selecionar_pdf():
 # selecionar_planilha removida — competências carregadas do Google Sheets
 
 
+def _compartilhar_login_com_gabinete():
+    """Garante que o aura_config.json (lido pelo Gabinete) tenha o mesmo
+    usuario/senha/url da tela inicial. Faz merge para não apagar a chave de IA
+    já salva. Nunca lança exceção: se falhar, o Gabinete usa os planos B."""
+    try:
+        caminho = os.path.join(_pasta_config_externa(), ARQUIVO_CONFIG)
+        dados = {}
+        if os.path.exists(caminho):
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        dados.update({"usuario": USUARIO, "senha": SENHA, "url": URL})
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(dados, f)
+    except Exception:
+        pass
+
+
 def abrir_aura_gabinete():
     try:
+        _compartilhar_login_com_gabinete()
         _auragabinete.AppGUI(janela)
     except Exception as e:
         messagebox.showerror("AURA Gabinete", f"Erro ao abrir o Gabinete:\n\n{e}")
@@ -1374,7 +1441,7 @@ def abrir_aura_cotri():
         _compartilhar_login_com_aura_cotri()
         _run_cotri.AuraCotriApp(janela)
     except Exception as e:
-        messagebox.showerror("AURA COTRI", f"Erro ao abrir o AURA COTRI:\n\n{e}")
+        messagebox.showerror("AURA Distribuição", f"Erro ao abrir o AURA Distribuição:\n\n{e}")
 
 
 def _compartilhar_login_com_aura_eventoscamaracivel():
@@ -2722,7 +2789,7 @@ class AuraApp(ctk.CTk):
         # INTEGRAÇÃO
         c_int = card(col_esq, "🧭  INTEGRAÇÃO", COR_PRIMARIA)
         abtn(c_int, "🧭  AURA GABINETE", COR_PRIMARIA, abrir_aura_gabinete)
-        abtn(c_int, "🧭  AURA COTRI", COR_ROXO, abrir_aura_cotri)
+        abtn(c_int, "🧭  AURA Distribuição", COR_ROXO, abrir_aura_cotri)
         abtn(c_int, "⚖️  AURA EVENTOS CÂMARA CÍVEL", COR_ROXO, abrir_aura_eventoscamaracivel)
         abtn(c_int, "🗳️  AURA SESSÃO DE JULGAMENTO", COR_ROXO, abrir_aura_sessaojulgamento)
 
@@ -2843,7 +2910,7 @@ class AuraApp(ctk.CTk):
         ctk.CTkLabel(
             jan,
             text="Vai rodar o pipeline completo contra HOMOLOGAÇÃO:\n"
-                 "1. COTRI distribui  2. GABINETE minuta + remessa\n"
+                 "1. Distribuição distribui  2. GABINETE minuta + remessa\n"
                  "3. MAGISTRADO assina (login descoberto automaticamente)\n"
                  "4. CARTÓRIO intima  5. ADVOGADO responde\n\n"
                  "Isso cria e assina uma minuta de teste de verdade, e\n"
