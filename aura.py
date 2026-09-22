@@ -6,6 +6,10 @@ import csv
 import subprocess
 import shutil
 import traceback
+import re
+import unicodedata
+import math
+from urllib.parse import urlsplit, urlunsplit, quote
 
 # Modulos foram organizados em subpastas (integrations/, shared/) em vez de
 # soltos na raiz -- adiciona ambas ao sys.path para que os imports abaixo
@@ -52,6 +56,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -96,6 +101,406 @@ URL = "https://eproc2g-hml.tjmg.jus.br/eproc/"
 PAUSADO = False
 lbl_strip_comp = None
 lbl_strip_pdf = None
+
+
+def _log_dados_planilha(mensagem):
+    """Registra problemas de leitura/higienização sem interromper o lote."""
+    texto = f"[aura] {mensagem}"
+    print(texto)
+    try:
+        caminho_log = os.path.join(_pasta_config_externa(), "aura_leitura_planilha.log")
+        with open(caminho_log, "a", encoding="utf-8") as _f:
+            _f.write(time.strftime("%d/%m/%Y %H:%M:%S") + "  " + texto + "\n")
+    except Exception:
+        pass
+
+
+def _higienizar_texto(valor, campo="", num_fila=None):
+    """Normaliza espaços invisíveis, Unicode e quebras de linha vindos da planilha."""
+    original = valor
+    if valor is None:
+        texto = ""
+    elif isinstance(valor, float) and math.isnan(valor):
+        texto = ""
+    else:
+        texto = str(valor)
+
+    texto = (texto
+             .replace("\xa0", " ")
+             .replace("\u200b", "")
+             .replace("\u200c", "")
+             .replace("\u200d", "")
+             .replace("\ufeff", ""))
+    texto = unicodedata.normalize("NFKC", texto)
+    texto = texto.replace("\r", " ").replace("\n", " ")
+    texto = re.sub(r"\s+", " ", texto).strip()
+
+    if original not in (None, "") and not texto and campo:
+        _log_dados_planilha(
+            f"Linha {num_fila}: campo '{campo}' ficou vazio após higienização."
+        )
+    return texto
+
+
+def _higienizar_para_comparacao(valor):
+    """Normalização usada apenas para comparar textos do eProc com a planilha."""
+    texto = _higienizar_texto(valor)
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(ch for ch in texto if unicodedata.category(ch) != "Mn")
+    return re.sub(r"\s+", " ", texto).strip().casefold()
+
+
+def _codificar_url(url):
+    """Limpa e percent-encode apenas as partes necessárias de uma URL."""
+    texto = _higienizar_texto(url, campo="URL")
+    if not texto or not re.match(r"^https?://", texto, flags=re.IGNORECASE):
+        return texto
+    try:
+        partes = urlsplit(texto)
+        caminho = quote(partes.path, safe="/%:@-._~!$&'()*+,;=")
+        consulta = quote(partes.query, safe="/%:@-._~!$&'()*+,;=?&")
+        fragmento = quote(partes.fragment, safe="/%:@-._~!$&'()*+,;=?&")
+        return urlunsplit((partes.scheme, partes.netloc, caminho, consulta, fragmento))
+    except Exception as e:
+        _log_dados_planilha(f"URL não pôde ser codificada: {e}")
+        return texto
+
+
+def _higienizar_valor_planilha(valor, campo, num_fila):
+    texto = _higienizar_texto(valor, campo=campo, num_fila=num_fila)
+    if re.match(r"^https?://", texto, flags=re.IGNORECASE):
+        return _codificar_url(texto)
+    return texto
+
+
+def _higienizar_dados_planilha(linhas):
+    """Mantém o mesmo formato de lista de dicionários, mas limpa todos os valores."""
+    if not linhas:
+        _log_dados_planilha("A competência selecionada não retornou linhas.")
+        return []
+
+    resultado = []
+    for idx, linha in enumerate(linhas, start=1):
+        if not isinstance(linha, dict):
+            _log_dados_planilha(
+                f"Linha {idx}: formato inesperado ({type(linha).__name__}); linha preservada como vazia."
+            )
+            resultado.append({})
+            continue
+
+        limpa = {}
+        for chave, valor in linha.items():
+            campo = _higienizar_texto(chave)
+            limpa[campo] = _higienizar_valor_planilha(valor, campo, idx)
+
+        for campo_critico in (
+            "AREA", "Classeprocessual", "Assunto",
+            "Tipoautor", "Tiporeu", "Numero de processo originario", "Tipodocumento"
+        ):
+            chave_limpa = _higienizar_texto(campo_critico)
+            if chave_limpa in limpa and not limpa.get(chave_limpa, ""):
+                _log_dados_planilha(f"Linha {idx}: campo '{campo_critico}' veio vazio.")
+
+        resultado.append(limpa)
+
+    return resultado
+
+
+def _executar_com_retry_stale(acao, tentativas=4, espera=0.4, contexto=""):
+    """Executa uma ação e repete quando o eProc substitui o elemento via AJAX/Postback."""
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            return acao()
+        except StaleElementReferenceException as e:
+            ultimo_erro = e
+            if tentativa < tentativas:
+                time.sleep(espera * tentativa)
+                continue
+            if contexto:
+                raise RuntimeError(f"Elemento dinâmico ficou stale em {contexto}: {e}") from e
+            raise
+    if ultimo_erro:
+        raise ultimo_erro
+    return None
+
+
+def _obter_elemento(driver, locator, wait=60, clicavel=False):
+    """Sempre busca um elemento novo no DOM, essencial após AJAX/Postback."""
+    condicao = EC.element_to_be_clickable(locator) if clicavel else EC.presence_of_element_located(locator)
+    return WebDriverWait(driver, wait).until(condicao)
+
+
+def _selecionar_select(driver, locator, modo, valor, contexto="", espera_apos=0):
+    """Refaz a localização do <select> a cada tentativa para suportar DOM dinâmico."""
+    def acao():
+        elemento = _obter_elemento(driver, locator, wait=60)
+        sel = Select(elemento)
+        if modo == "index":
+            sel.select_by_index(int(valor))
+        elif modo == "value":
+            sel.select_by_value(str(valor))
+        elif modo == "text":
+            sel.select_by_visible_text(str(valor))
+        else:
+            raise ValueError(f"Modo de seleção inválido: {modo}")
+        return True
+    resultado = _executar_com_retry_stale(acao, contexto=contexto)
+    if espera_apos:
+        time.sleep(espera_apos)
+    return resultado
+
+
+def _aguardar_select_com_opcoes(driver, locator, minimo=2, timeout=60):
+    """Aguarda o <select> reaparecer e ser repopulado após AJAX/Postback."""
+    def condicao(d):
+        try:
+            elemento = d.find_element(*locator)
+            return elemento if len(Select(elemento).options) >= minimo else False
+        except StaleElementReferenceException:
+            return False
+        except Exception:
+            return False
+    return WebDriverWait(driver, timeout).until(condicao)
+
+
+def _selecionar_select_texto_flexivel(driver, locator, valor, contexto="", espera_apos=0):
+    """Seleciona <option> por igualdade/substring, ignorando caixa e acentos."""
+    alvo = _higienizar_para_comparacao(valor)
+    if not alvo:
+        return False
+
+    def acao():
+        elemento = _obter_elemento(driver, locator, wait=60)
+        sel = Select(elemento)
+        opcoes = []
+        for indice, opcao in enumerate(sel.options):
+            texto = _higienizar_texto(opcao.text)
+            normalizado = _higienizar_para_comparacao(texto)
+            if normalizado == alvo:
+                sel.select_by_index(indice)
+                return True
+            if alvo in normalizado or normalizado in alvo:
+                opcoes.append((abs(len(normalizado) - len(alvo)), indice))
+        if opcoes:
+            opcoes.sort(key=lambda item: item[0])
+            sel.select_by_index(opcoes[0][1])
+            return True
+        raise LookupError(f"Opção '{valor}' não encontrada no select {locator}")
+
+    resultado = _executar_com_retry_stale(acao, contexto=contexto)
+    if espera_apos:
+        time.sleep(espera_apos)
+    return resultado
+
+
+def _assinatura_opcoes_select(driver, locator):
+    """Retorna uma assinatura estável das opções atuais de um <select>."""
+    try:
+        elemento = driver.find_element(*locator)
+        return tuple(
+            (
+                opcao.get_attribute("value") or "",
+                _higienizar_texto(opcao.text),
+            )
+            for opcao in Select(elemento).options
+        )
+    except (StaleElementReferenceException, Exception):
+        return tuple()
+
+
+def _aguardar_atualizacao_classes(driver, assinatura_anterior=(), timeout=60):
+    """
+    Aguarda o eProc terminar o AJAX/Postback disparado pela Área e devolver
+    um select de Classe Processual válido e repopulado. A busca do elemento é
+    refeita a cada tentativa porque o eProc pode substituir o <select>.
+    """
+    locator = (By.ID, "selIdClasseJudicial")
+
+    def condicao(d):
+        try:
+            elemento = d.find_element(*locator)
+            opcoes = Select(elemento).options
+            if len(opcoes) < 2:
+                return False
+
+            assinatura_atual = tuple(
+                (opcao.get_attribute("value") or "", _higienizar_texto(opcao.text))
+                for opcao in opcoes
+            )
+
+            # Quando o select antigo já estava vazio/inicializado, basta ele
+            # possuir opções válidas. Quando havia uma lista anterior, exige
+            # que ela tenha sido efetivamente alterada pelo AJAX.
+            if not assinatura_anterior or assinatura_atual != assinatura_anterior:
+                return elemento
+            return False
+        except (StaleElementReferenceException, Exception):
+            return False
+
+    return WebDriverWait(driver, timeout).until(condicao)
+
+
+def _selecionar_area_e_classe(driver, num_fila, id_area, id_classe, status=None):
+    """
+    Seleciona Área e, somente depois do refresh dinâmico do eProc, seleciona
+    Classe Processual pelo POS n informado na planilha.
+
+    O ponto crítico aqui é não reutilizar o <select> de classe obtido antes
+    do AJAX da Área. Cada leitura/seleção é feita sobre o DOM atual e a
+    seleção final é conferida pelo próprio índice e pelo texto exibido.
+    """
+    area_locator = (By.ID, "selIdGrupoCompetencia")
+    classe_locator = (By.ID, "selIdClasseJudicial")
+
+    assinatura_anterior = _assinatura_opcoes_select(driver, classe_locator)
+
+    if status:
+        status.configure(text=f"L{num_fila}: Selecionando Área POS {id_area}...")
+
+    _selecionar_select(
+        driver, area_locator, "index", id_area,
+        contexto=f"Área da linha {num_fila}", espera_apos=0
+    )
+
+    # Não usa sleep fixo para decidir se a classe está pronta. Espera o DOM
+    # efetivamente mudar ou reaparecer com opções.
+    _aguardar_atualizacao_classes(
+        driver, assinatura_anterior=assinatura_anterior, timeout=60
+    )
+
+    if status:
+        status.configure(text=f"L{num_fila}: Área POS {id_area} selecionada; aguardando Classe POS {id_classe}...")
+
+    def selecionar_e_confirmar():
+        elemento = _obter_elemento(driver, classe_locator, wait=60)
+        selecao = Select(elemento)
+        opcoes = selecao.options
+
+        if not 0 <= int(id_classe) < len(opcoes):
+            resumo = " | ".join(
+                f"{i}={_higienizar_texto(o.text)[:80]}"
+                for i, o in enumerate(opcoes)
+            )
+            raise IndexError(
+                f"Classe POS {id_classe} fora do intervalo do eProc "
+                f"(0..{len(opcoes)-1}). Opções: {resumo}"
+            )
+
+        opcao_alvo = opcoes[int(id_classe)]
+        texto_alvo = _higienizar_texto(opcao_alvo.text)
+        valor_alvo = opcao_alvo.get_attribute("value") or ""
+
+        selecao.select_by_index(int(id_classe))
+
+        # O eProc pode reconstruir o próprio select imediatamente após a
+        # seleção. Reobtém o elemento antes de confirmar o resultado.
+        elemento_atual = _obter_elemento(driver, classe_locator, wait=15)
+        selecao_atual = Select(elemento_atual)
+        selecionado = selecao_atual.first_selected_option
+        indice_atual = selecionado.get_attribute("index")
+        texto_atual = _higienizar_texto(selecionado.text)
+        valor_atual = selecionado.get_attribute("value") or ""
+
+        indice_ok = (
+            indice_atual is None
+            or int(indice_atual) == int(id_classe)
+        )
+        valor_ok = (
+            valor_alvo == valor_atual
+            if valor_alvo
+            else _higienizar_para_comparacao(texto_alvo) == _higienizar_para_comparacao(texto_atual)
+        )
+
+        if not indice_ok or not valor_ok:
+            raise RuntimeError(
+                f"Classe não confirmada: solicitada POS {id_classe} / '{texto_alvo}', "
+                f"mas o eProc ficou em '{texto_atual}'."
+            )
+
+        return texto_atual
+
+    texto_selecionado = _executar_com_retry_stale(
+        selecionar_e_confirmar,
+        tentativas=4,
+        espera=0.8,
+        contexto=f"Classe Processual da linha {num_fila}"
+    )
+
+    if status:
+        status.configure(
+            text=f"L{num_fila}: Classe POS {id_classe} selecionada → '{texto_selecionado}'"
+        )
+    print(
+        f"[aura] L{num_fila}: Área POS {id_area} | "
+        f"Classe POS {id_classe} → '{texto_selecionado}'"
+    )
+    time.sleep(1)
+    return texto_selecionado
+
+
+def _preencher_campo(driver, locator, valor, contexto="", espera_apos=0):
+    """Refaz a busca do campo em cada tentativa e suporta substituições do DOM."""
+    def acao():
+        campo = _obter_elemento(driver, locator, wait=60)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo)
+        campo.click()
+        campo.clear()
+        campo.send_keys(valor)
+        return True
+    resultado = _executar_com_retry_stale(acao, contexto=contexto)
+    if espera_apos:
+        time.sleep(espera_apos)
+    return resultado
+
+
+def _encontrar_opcao_por_texto(driver, alvo, xpath="//*[contains(@id, '_anchor')]"):
+    """Encontra opção por igualdade ou conteúdo, ignorando caixa, acentos e espaços."""
+    alvo_n = _higienizar_para_comparacao(alvo)
+    if not alvo_n:
+        return None
+
+    candidatos = []
+    try:
+        elementos = driver.find_elements(By.XPATH, xpath)
+    except Exception:
+        return None
+
+    for el in elementos:
+        try:
+            if not el.is_displayed():
+                continue
+            texto = _higienizar_texto(el.text or el.get_attribute("textContent") or "")
+            texto_n = _higienizar_para_comparacao(texto)
+            if not texto_n:
+                continue
+            ident_n = _higienizar_para_comparacao((el.get_attribute("id") or "").replace("_anchor", ""))
+            if texto_n == alvo_n or ident_n == alvo_n:
+                return el
+            if alvo_n in texto_n or texto_n in alvo_n or (ident_n and (alvo_n in ident_n or ident_n in alvo_n)):
+                candidatos.append((abs(len(texto_n) - len(alvo_n)), el))
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+    if candidatos:
+        candidatos.sort(key=lambda item: item[0])
+        return candidatos[0][1]
+    return None
+
+
+def _clicar_opcao_por_texto(driver, alvo, xpath="//*[contains(@id, '_anchor')]", contexto=""):
+    """Localiza e clica numa opção, refazendo a busca se o AJAX substituir o DOM."""
+    def acao():
+        opcao = _encontrar_opcao_por_texto(driver, alvo, xpath=xpath)
+        if opcao is None:
+            raise LookupError(f"Opção não encontrada para '{alvo}'")
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", opcao)
+        time.sleep(0.2)
+        driver.execute_script("arguments[0].click();", opcao)
+        return True
+    return _executar_com_retry_stale(acao, contexto=contexto)
 
 
 def _pasta_config_externa():
@@ -213,28 +618,24 @@ def capturar_dados_finais(driver, wait, aviso="", assunto=""):
 
 
 def clicar_seguro(driver, wait, xpath, obrigatorio=False):
-    """Clica num elemento localizado por XPath.
+    """Clica num elemento localizado por XPath com refetch/retry para DOM dinâmico.
 
-    obrigatorio=True para cliques criticos (abertura da Peticao Inicial,
-    barra de acao): nesses casos a falha levanta RuntimeError em vez de so
-    imprimir um aviso. Falhar em silencio fazia o robo seguir o fluxo numa
-    tela errada, e o problema so aparecia muito depois -- tipicamente como
-    "selecao errada" na Tela 1, sem nenhuma pista da causa real.
-
-    Retorna True se clicou, False se falhou e nao era obrigatorio.
+    obrigatorio=True mantém o comportamento crítico do fluxo: falha levanta RuntimeError.
     """
-    try:
-        elemento = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    def acao():
+        elemento = _obter_elemento(driver, (By.XPATH, xpath), wait=60, clicavel=True)
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
-        time.sleep(0.5)
+        time.sleep(0.3)
         driver.execute_script("arguments[0].click();", elemento)
         return True
+
+    try:
+        return _executar_com_retry_stale(acao, contexto=f"clique {xpath}")
     except Exception as e:
         if obrigatorio:
             raise RuntimeError(f"Clique obrigatorio falhou em {xpath}: {e}") from e
         print(f"[aura] Aviso: clicar_seguro falhou em {xpath}: {e}")
         return False
-
 
 def aceitar_alertas_pendentes(driver, tentativas=3):
     """Aceita alertas do navegador, como o OK dos avisos do eproc."""
@@ -548,6 +949,8 @@ def extrair_documento_parte(texto):
     depois_igual = texto.split("=", 1)[-1] if "=" in texto else texto
     match = re.search(r"[\d\.\-/]{8,20}", depois_igual)
     if not match:
+        if depois_igual:
+            _log_dados_planilha(f"Não foi possível extrair CPF/CNPJ de: '{depois_igual[:120]}'.")
         return ""
     return re.sub(r"\D", "", match.group(0))
 
@@ -562,7 +965,10 @@ def extrair_nome_parte(texto):
     parte = texto.split("=", 1)[-1] if "=" in texto else texto
     parte = re.sub(r"[\d\.\-/]{8,20}", "", parte)
     parte = re.sub(r"\s+", " ", parte)
-    return parte.strip()
+    resultado = parte.strip()
+    if not resultado and texto:
+        _log_dados_planilha(f"Não foi possível extrair nome/descrição da parte: '{texto[:120]}'.")
+    return resultado
 
 
 def incluir_pessoa_fisica(driver, wait, status, num_fila, polo_nome, dados_parte):
@@ -572,37 +978,41 @@ def incluir_pessoa_fisica(driver, wait, status, num_fila, polo_nome, dados_parte
     identificador = documento or nome
     if not identificador:
         status.configure(text=f"L{num_fila}: {polo_nome} sem CPF/nome na planilha.")
+        _log_dados_planilha(f"Linha {num_fila}: {polo_nome} sem CPF/nome após higienização.")
         return False
 
     try:
         status.configure(text=f"L{num_fila}: Preenchendo {polo_nome} ({identificador[:20]})...")
 
-        # Se o eProc usar txtNumDoc em vez de txtCpfCnpj, adapta
         campo_cpf_id = "txtCpfCnpj" if campo_existe(driver, "txtCpfCnpj") else (
             "txtNumDoc" if campo_existe(driver, "txtNumDoc") else None
         )
 
         if documento and campo_cpf_id and campo_visivel(driver, campo_cpf_id):
+            # A seleção do tipo de pessoa pode disparar AJAX; nunca reutiliza o elemento antigo.
             try:
                 if campo_existe(driver, "selTipoPessoa"):
-                    Select(wait.until(EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("PF")
-                    time.sleep(0.5)
-                # selTipoDoc (alternativa ao selTipoPessoa em versões novas do eproc)
+                    _selecionar_select(
+                        driver, (By.ID, "selTipoPessoa"), "value", "PF",
+                        contexto=f"tipo pessoa PF da linha {num_fila}", espera_apos=0.5
+                    )
                 elif campo_existe(driver, "selTipoDoc"):
-                    try:
-                        sel_td = Select(driver.find_element(By.ID, "selTipoDoc"))
-                        opcoes = [o.get_attribute("value") for o in sel_td.options]
+                    def selecionar_tipo_doc():
+                        sel_td = _obter_elemento(driver, (By.ID, "selTipoDoc"), wait=10)
+                        opcoes = [o.get_attribute("value") for o in Select(sel_td).options]
                         if "PF" in opcoes:
-                            sel_td.select_by_value("PF")
-                            time.sleep(0.5)
-                    except:
-                        pass
-            except:
-                pass
-            campo_doc = wait.until(EC.presence_of_element_located((By.ID, campo_cpf_id)))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo_doc)
-            campo_doc.clear()
-            campo_doc.send_keys(documento)
+                            Select(sel_td).select_by_value("PF")
+                            return True
+                        return False
+                    _executar_com_retry_stale(selecionar_tipo_doc, contexto=f"tipo doc PF da linha {num_fila}")
+                    time.sleep(0.5)
+            except Exception as e:
+                print(f"[aura] Aviso: L{num_fila}: falha ao selecionar tipo de pessoa PF: {e}")
+
+            _preencher_campo(
+                driver, (By.ID, campo_cpf_id), documento,
+                contexto=f"documento {polo_nome} da linha {num_fila}"
+            )
             clicar_seguro(driver, wait, '//*[@id="btnConsultarNome"]')
             time.sleep(1.5)
             clicar_seguro(driver, wait, '//*[@id="btnIncluir"]')
@@ -610,25 +1020,22 @@ def incluir_pessoa_fisica(driver, wait, status, num_fila, polo_nome, dados_parte
             return True
 
         if not nome or not campo_existe(driver, "txtNome"):
+            _log_dados_planilha(f"Linha {num_fila}: {polo_nome} sem campo txtNome ou sem nome para inclusão.")
             return False
 
-        campo_nome = wait.until(EC.presence_of_element_located((By.ID, "txtNome")))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo_nome)
-        driver.execute_script("arguments[0].value = '';", campo_nome)
-        time.sleep(0.3)
-        campo_nome.send_keys(nome)
+        _preencher_campo(
+            driver, (By.ID, "txtNome"), nome,
+            contexto=f"nome {polo_nome} da linha {num_fila}"
+        )
         time.sleep(0.5)
         clicar_seguro(driver, wait, '//*[@id="btnConsultarNome"]')
         time.sleep(2)
         clicar_seguro(driver, wait, '//*[@id="btnIncluir"]')
         time.sleep(1.5)
         return True
-    except:
+    except Exception as e:
+        print(f"[aura] Aviso: falha ao incluir {polo_nome} na linha {num_fila}: {e}")
         return False
-
-
-_ultimo_aviso = []  # lista mutável para capturar aviso fora do escopo
-
 
 def erro_na_linha(num_fila, erro, status):
     """Exibe janela de erro por linha com opção de Repetir, Pular ou Parar."""
@@ -710,26 +1117,44 @@ def fechar_alerta(driver):
 
 
 def incluir_autocomplete(driver, wait, actions, campo_id, div_id, nome, btn_incluir_xpath):
-    """Digita no campo autocomplete, aguarda sugestão, clica com ActionChains e inclui."""
-    campo = wait.until(EC.presence_of_element_located((By.ID, campo_id)))
-    # Clica para disparar onclick (limpa valor padrao como "Digite para selecionar...")
-    driver.execute_script("arguments[0].click();", campo)
-    time.sleep(0.5)
-    campo.clear()
-    # Limpa via JS caso ainda tenha valor residual
-    driver.execute_script("arguments[0].value = '';", campo)
-    campo.send_keys(nome[:30])
-    time.sleep(3)
-    # Aguarda o dropdown ficar visivel
-    wait.until(EC.visibility_of_element_located((By.ID, div_id)))
-    time.sleep(0.5)
-    sugestao = driver.find_element(By.XPATH, f"//div[@id='{div_id}']//li[1]/a")
-    # Move o mouse ate a sugestao e clica (simula comportamento humano)
-    actions.move_to_element(sugestao).pause(0.3).click().perform()
-    time.sleep(2)
-    clicar_seguro(driver, wait, btn_incluir_xpath)
-    time.sleep(2)
+    """Digita no autocomplete, aguarda sugestões e escolhe por texto com tolerância."""
+    nome = _higienizar_texto(nome)
+    if not nome:
+        raise Exception(f"Valor vazio para autocomplete {campo_id}.")
 
+    def acao():
+        campo = _obter_elemento(driver, (By.ID, campo_id), wait=60, clicavel=True)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo)
+        campo.click()
+        campo.clear()
+        driver.execute_script("arguments[0].value = '';", campo)
+        campo.send_keys(nome[:30])
+
+        WebDriverWait(driver, 60).until(EC.visibility_of_element_located((By.ID, div_id)))
+        sugestao = _encontrar_opcao_por_texto(
+            driver,
+            nome,
+            xpath=f"//div[@id='{div_id}']//li/a"
+        )
+        if sugestao is None:
+            sugestao = _obter_elemento(
+                driver, (By.XPATH, f"//div[@id='{div_id}']//li[1]/a"), wait=20
+            )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sugestao)
+        try:
+            actions.move_to_element(sugestao).pause(0.3).click().perform()
+        except StaleElementReferenceException:
+            # O autocomplete pode reconstruir a lista imediatamente antes do clique.
+            sugestao = _obter_elemento(
+                driver, (By.XPATH, f"//div[@id='{div_id}']//li[1]/a"), wait=20, clicavel=True
+            )
+            actions.move_to_element(sugestao).pause(0.2).click().perform()
+        time.sleep(0.5)
+        clicar_seguro(driver, wait, btn_incluir_xpath)
+        return True
+
+    _executar_com_retry_stale(acao, tentativas=4, espera=0.6, contexto=f"autocomplete {campo_id}")
+    time.sleep(2)
 
 def assunto_principal_incluido(driver):
     """Retorna True quando ha ao menos um assunto principal na tabela."""
@@ -746,7 +1171,7 @@ def assunto_principal_incluido(driver):
 
 def selecionar_assunto_da_planilha(driver, wait, status, num_fila, assunto, tem_originario):
     """Filtra, seleciona e confirma o assunto informado na planilha."""
-    assunto = str(assunto or "").strip()
+    assunto = _higienizar_texto(assunto)
     if not assunto:
         raise Exception("Assunto vazio na planilha.")
 
@@ -757,49 +1182,50 @@ def selecionar_assunto_da_planilha(driver, wait, status, num_fila, assunto, tem_
         try:
             btns_remover = driver.find_elements(By.XPATH, '//*[@id="tblAssuntoPrincipal"]/tbody/tr/td[8]/img')
             for btn_remover in btns_remover:
-                driver.execute_script("arguments[0].click();", btn_remover)
-                time.sleep(0.8)
                 try:
-                    driver.switch_to.alert.accept()
-                except:
-                    pass
-        except:
+                    driver.execute_script("arguments[0].click();", btn_remover)
+                    time.sleep(0.8)
+                    try:
+                        driver.switch_to.alert.accept()
+                    except Exception:
+                        pass
+                except StaleElementReferenceException:
+                    # A tabela pode ser reconstruída após cada remoção; busca novamente na próxima iteração.
+                    break
+        except Exception:
             pass
 
-    campo_assunto = wait.until(EC.element_to_be_clickable((By.ID, "txtFiltroPesquisa")))
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo_assunto)
-    time.sleep(0.5)
-    campo_assunto.clear()
-    campo_assunto.click()
-    campo_assunto.send_keys(assunto)
-    time.sleep(1)
+    def filtrar_assunto():
+        campo_assunto = _obter_elemento(driver, (By.ID, "txtFiltroPesquisa"), wait=60, clicavel=True)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", campo_assunto)
+        campo_assunto.clear()
+        campo_assunto.click()
+        campo_assunto.send_keys(assunto)
+        time.sleep(0.5)
+        clicar_seguro(driver, wait, '//*[@id="btnFiltrar"]')
+        return True
 
-    btn_filtrar = wait.until(EC.element_to_be_clickable((By.ID, "btnFiltrar")))
-    driver.execute_script("arguments[0].click();", btn_filtrar)
+    _executar_com_retry_stale(filtrar_assunto, contexto=f"filtro de assunto da linha {num_fila}")
     time.sleep(2)
 
-    xpaths_resultado = [
-        f'//*[@id="{assunto}_anchor"]',
-        f'//*[@id="{assunto}_anchor"]/span/span',
-        f'//*[contains(@id, "_anchor") and contains(normalize-space(.), "{assunto}")]',
-    ]
     ultimo_erro = None
-    for xpath in xpaths_resultado:
-        try:
-            opcao = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", opcao)
-            time.sleep(0.3)
-            driver.execute_script("arguments[0].click();", opcao)
-            ultimo_erro = None
-            break
-        except Exception as e:
-            ultimo_erro = e
+    try:
+        # Primeiro tenta igualdade/substring ignorando caixa, acentos e espaços.
+        _executar_com_retry_stale(
+            lambda: _clicar_opcao_por_texto(
+                driver, assunto,
+                xpath="//*[contains(@id, '_anchor')]",
+                contexto=f"seleção textual do assunto da linha {num_fila}"
+            ),
+            contexto=f"seleção do assunto da linha {num_fila}"
+        )
+        ultimo_erro = None
+    except Exception as e:
+        ultimo_erro = e
 
     if ultimo_erro:
-        # Nenhum resultado bateu exatamente com o texto da planilha: pede à IA
-        # para escolher, entre as opções realmente exibidas na tela, a mais
-        # compatível. Se a IA falhar ou não achar nada razoável, cai no
-        # comportamento antigo (erro tratado por erro_na_linha).
+        # Fallback preservado: a IA só decide quando a lista real do eProc não produziu
+        # uma correspondência textual aceitável.
         codigo_ia = None
         try:
             opcoes = []
@@ -807,24 +1233,32 @@ def selecionar_assunto_da_planilha(driver, wait, status, num_fila, assunto, tem_
                 try:
                     if not el.is_displayed():
                         continue
-                    texto = " ".join(el.text.split())
+                    texto = _higienizar_texto(el.text or el.get_attribute("textContent") or "")
                     id_el = (el.get_attribute("id") or "").replace("_anchor", "")
                     if texto and id_el:
                         opcoes.append((id_el, texto))
+                except StaleElementReferenceException:
+                    continue
                 except Exception:
                     continue
             if opcoes:
-                status.configure(text=f"L{num_fila}: Assunto '{assunto}' não encontrado exato. Consultando IA...")
+                status.configure(text=f"L{num_fila}: Assunto '{assunto}' não encontrado por texto. Consultando IA...")
                 codigo_ia = _agente_mod.escolher_assunto_similar(assunto, opcoes)
         except Exception:
             codigo_ia = None
 
         if codigo_ia:
             try:
-                opcao = wait.until(EC.element_to_be_clickable((By.XPATH, f'//*[@id="{codigo_ia}_anchor"]')))
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", opcao)
-                time.sleep(0.3)
-                driver.execute_script("arguments[0].click();", opcao)
+                def clicar_codigo_ia():
+                    opcao = driver.find_element(By.XPATH, f'//*[@id="{codigo_ia}_anchor"]')
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", opcao)
+                    driver.execute_script("arguments[0].click();", opcao)
+                    return True
+
+                _executar_com_retry_stale(
+                    clicar_codigo_ia,
+                    contexto=f"clique do assunto IA da linha {num_fila}"
+                )
                 status.configure(text=f"L{num_fila}: IA selecionou Assunto '{codigo_ia}' como equivalente a '{assunto}'.")
                 ultimo_erro = None
             except Exception:
@@ -838,18 +1272,12 @@ def selecionar_assunto_da_planilha(driver, wait, status, num_fila, assunto, tem_
     fechar_alerta(driver)
     try:
         wait.until(lambda d: assunto_principal_incluido(d))
-    except:
+    except Exception:
         raise Exception(f"Assunto {assunto} nao foi incluido. Confira o codigo na planilha.")
 
-    # Aguarda o AJAX de registro do assunto concluir no servidor antes de avançar.
-    # assunto_principal_incluido() confirma apenas o DOM; sem esse sleep o servidor
-    # ainda pode estar gravando quando sbmProcessoEtapa2 é enviado, causando
-    # getStrDesAssunto() == null na tela de confirmação.
     time.sleep(2)
-
     clicar_seguro(driver, wait, '//*[@id="sbmProcessoEtapa2"]')
     fechar_alerta(driver)
-
 
 # ===============================
 # ROBÔ PRINCIPAL (AURA)
@@ -875,7 +1303,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
         if not URL:
             messagebox.showerror("AURA", "Informe a URL do sistema.")
             return
-        driver.get(URL)
+        driver.get(_codificar_url(URL))
         driver.maximize_window()
 
         # LOGIN
@@ -883,8 +1311,8 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
             messagebox.showerror("AURA", "Informe o usuário e a senha.")
             return
         status.configure(text="Status: Autenticando...")
-        wait.until(EC.presence_of_element_located((By.ID, "txtUsuario"))).send_keys(USUARIO)
-        driver.find_element(By.ID, "pwdSenha").send_keys(SENHA)
+        _preencher_campo(driver, (By.ID, "txtUsuario"), USUARIO, contexto="usuário do login")
+        _preencher_campo(driver, (By.ID, "pwdSenha"), SENHA, contexto="senha do login")
         clicar_seguro(driver, wait, '//*[@id="sbmEntrar"]')
 
         # PERFIL -- busca o perfil pelo TEXTO, nunca por posicao fixa.
@@ -936,9 +1364,9 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     tem_originario = proc_orig and proc_orig.upper() != "NAO PRECISA" and proc_orig.lower() != "nan"
 
                     # --- Detecta tipo do autor ---
-                    tipo_autor_upper = tipo_autor.upper()
+                    tipo_autor_upper = _higienizar_para_comparacao(tipo_autor).upper()
                     cpf_autor = extrair_documento_parte(tipo_autor)
-                    if tipo_autor_upper.startswith("JUÍZO =") or tipo_autor_upper.startswith("JUIZO ="):
+                    if tipo_autor_upper.startswith("JUIZO ="):
                         nome_juizo_autor = extrair_nome_parte(tipo_autor)
                         modo_autor = "JUIZO"
                     elif tipo_autor_upper.startswith("ENTIDADE ="):
@@ -947,16 +1375,15 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     elif tipo_autor_upper.startswith("AUTORIDADE COATORA ="):
                         nome_autoridade_autor = extrair_nome_parte(tipo_autor)
                         modo_autor = "AUTORIDADE"
-                    elif tipo_autor_upper.startswith("PESSOA JURÍDICA =") or tipo_autor_upper.startswith(
-                            "PESSOA JURIDICA ="):
+                    elif tipo_autor_upper.startswith("PESSOA JURIDICA ="):
                         modo_autor = "PJ"
                     else:
                         modo_autor = "PESSOA"
 
                     # --- Detecta tipo do réu ---
-                    tipo_reu_upper = tipo_reu.upper()
+                    tipo_reu_upper = _higienizar_para_comparacao(tipo_reu).upper()
                     cpf_reu = extrair_documento_parte(tipo_reu)
-                    if tipo_reu_upper.startswith("JUÍZO =") or tipo_reu_upper.startswith("JUIZO ="):
+                    if tipo_reu_upper.startswith("JUIZO ="):
                         nome_juizo = extrair_nome_parte(tipo_reu)
                         modo_reu = "JUIZO"
                     elif tipo_reu_upper.startswith("ENTIDADE ="):
@@ -965,8 +1392,7 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     elif tipo_reu_upper.startswith("AUTORIDADE COATORA ="):
                         nome_autoridade_reu = extrair_nome_parte(tipo_reu)
                         modo_reu = "AUTORIDADE"
-                    elif tipo_reu_upper.startswith("PESSOA JURÍDICA =") or tipo_reu_upper.startswith(
-                            "PESSOA JURIDICA ="):
+                    elif tipo_reu_upper.startswith("PESSOA JURIDICA ="):
                         modo_reu = "PJ"
                     elif tipo_reu_upper.strip() in ("NAO PRECISA", "", "NAN"):
                         modo_reu = "NENHUM"
@@ -974,19 +1400,23 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                         modo_reu = "PESSOA"
 
                     # --- TELA 1: DADOS INICIAIS ---
-                    sel_area = Select(wait.until(EC.presence_of_element_located((By.ID, "selIdGrupoCompetencia"))))
                     detectar_campos_novos(driver, "Tela 1 - Dados Iniciais", status, num_fila)
-                    sel_area.select_by_index(id_area)
-                    time.sleep(3)
-                    wait.until(lambda d: len(Select(d.find_element(By.ID, "selIdClasseJudicial")).options) > 1)
-                    Select(driver.find_element(By.ID, "selIdClasseJudicial")).select_by_index(id_classe)
-                    time.sleep(1)
+                    _selecionar_area_e_classe(
+                        driver, num_fila, id_area, id_classe, status=status
+                    )
                     # Seleciona tipo de justica se informado na planilha
                     if tipo_justica:
                         try:
-                            nth = "1" if tipo_justica == "1" else "2"
-                            driver.execute_script(
-                                f"document.querySelector('#selTipoJustica > option:nth-child({nth})').selected = true; verificarTipoJustica();")
+                            nth = 0 if tipo_justica == "1" else 1
+                            _executar_com_retry_stale(
+                                lambda: (driver.execute_script(
+                                    "const s = document.querySelector('#selTipoJustica'); "
+                                    "if (!s || !s.options[%d]) throw new Error('Tipo de Justiça indisponível'); "
+                                    "s.selectedIndex = %d; "
+                                    "if (typeof verificarTipoJustica === 'function') verificarTipoJustica();" % (nth, nth)
+                                ), True)[1],
+                                contexto=f"Tipo de Justiça da linha {num_fila}"
+                            )
                             time.sleep(1)
                         except Exception as e:
                             print(f"[aura] Aviso: L{num_fila}: falha ao selecionar Tipo de Justica: {e}")
@@ -997,8 +1427,10 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                         try:
                             sel_loc = driver.find_elements(By.ID, "selLocalidadeJudicial")
                             if sel_loc and sel_loc[0].is_displayed():
-                                Select(sel_loc[0]).select_by_visible_text(localidade)
-                                time.sleep(0.5)
+                                _selecionar_select_texto_flexivel(
+                                    driver, (By.ID, "selLocalidadeJudicial"), localidade,
+                                    contexto=f"Localidade Judicial da linha {num_fila}", espera_apos=0.5
+                                )
                         except Exception as e:
                             print(f"[aura] Aviso: L{num_fila}: falha ao selecionar Localidade Judicial '{localidade}': {e}")
 
@@ -1017,15 +1449,16 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
 
                     if tem_originario:
                         try:
-                            sel_origem = WebDriverWait(driver, 5).until(
-                                EC.presence_of_element_located((By.ID, "selTipoOrigemJudicial")))
-                            Select(sel_origem).select_by_visible_text("Sentença e Acórdão")
-                            time.sleep(1)
+                            _selecionar_select_texto_flexivel(
+                                driver, (By.ID, "selTipoOrigemJudicial"), "Sentença e Acórdão",
+                                contexto=f"Tipo de origem judicial da linha {num_fila}", espera_apos=1
+                            )
                         except:
                             pass
-                        campo_orig = wait.until(EC.presence_of_element_located((By.ID, "txtProcessoOriginario")))
-                        campo_orig.clear()
-                        campo_orig.send_keys(proc_orig)
+                        _preencher_campo(
+                            driver, (By.ID, "txtProcessoOriginario"), proc_orig,
+                            contexto=f"processo originário da linha {num_fila}"
+                        )
                         time.sleep(1)
                         for _chk_id in _chk_valor_ids:
                             try:
@@ -1113,12 +1546,14 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Autor = Pessoa Jurídica (CNPJ)
                             if campo_visivel(driver, "txtCpfCnpj"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Autor PJ (CNPJ)...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("PJ")
-                                time.sleep(1)
-                                input_cnpj = wait.until(EC.presence_of_element_located((By.ID, "txtCpfCnpj")))
-                                input_cnpj.clear()
-                                input_cnpj.send_keys(cpf_autor)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "PJ",
+                                    contexto=f"tipo PJ do Autor na linha {num_fila}", espera_apos=1
+                                )
+                                _preencher_campo(
+                                    driver, (By.ID, "txtCpfCnpj"), cpf_autor,
+                                    contexto=f"CNPJ do Autor na linha {num_fila}"
+                                )
                                 clicar_seguro(driver, wait, '//*[@id="btnConsultarNome"]')
                                 time.sleep(1.5)
                                 clicar_seguro(driver, wait, '//*[@id="btnIncluir"]')
@@ -1131,9 +1566,10 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Autor = Entidade (só se campo estiver visível)
                             if campo_visivel(driver, "selTipoPessoa"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Autor Entidade...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("ENT")
-                                time.sleep(1)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "ENT",
+                                    contexto=f"tipo Entidade do Autor na linha {num_fila}", espera_apos=1
+                                )
                                 incluir_autocomplete(driver, wait, actions,
                                                      "txtEntidade", "divInfraAjaxtxtEntidade",
                                                      nome_entidade_autor, '//*[@id="btnIncluirEnt"]')
@@ -1145,9 +1581,10 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Autor = Autoridade Coatora (só se campo estiver visível)
                             if campo_visivel(driver, "selTipoPessoa"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Autor Autoridade Coatora...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("AUT")
-                                time.sleep(1)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "AUT",
+                                    contexto=f"tipo Autoridade do Autor na linha {num_fila}", espera_apos=1
+                                )
                                 incluir_autocomplete(driver, wait, actions,
                                                      "txtDesAutoridade", "divInfraAjaxtxtDesAutoridade",
                                                      nome_autoridade_autor, '//*[@id="btnIncluirAut"]')
@@ -1175,9 +1612,10 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Réu = Entidade (só se campo estiver visível)
                             if campo_visivel(driver, "selTipoPessoa"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Reu Entidade...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("ENT")
-                                time.sleep(1)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "ENT",
+                                    contexto=f"tipo Entidade do Reu na linha {num_fila}", espera_apos=1
+                                )
                                 incluir_autocomplete(driver, wait, actions,
                                                      "txtEntidade", "divInfraAjaxtxtEntidade",
                                                      nome_entidade_reu, '//*[@id="btnIncluirEnt"]')
@@ -1189,9 +1627,10 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Réu = Autoridade Coatora (só se campo estiver visível)
                             if campo_visivel(driver, "selTipoPessoa"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Reu Autoridade Coatora...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("AUT")
-                                time.sleep(1)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "AUT",
+                                    contexto=f"tipo Autoridade do Reu na linha {num_fila}", espera_apos=1
+                                )
                                 incluir_autocomplete(driver, wait, actions,
                                                      "txtDesAutoridade", "divInfraAjaxtxtDesAutoridade",
                                                      nome_autoridade_reu, '//*[@id="btnIncluirAut"]')
@@ -1203,12 +1642,14 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                             # Réu = Pessoa Jurídica (CNPJ)
                             if campo_visivel(driver, "txtCpfCnpj"):
                                 status.configure(text=f"L{num_fila}: Preenchendo Reu PJ (CNPJ)...")
-                                Select(wait.until(
-                                    EC.presence_of_element_located((By.ID, "selTipoPessoa")))).select_by_value("PJ")
-                                time.sleep(1)
-                                input_cnpj = wait.until(EC.presence_of_element_located((By.ID, "txtCpfCnpj")))
-                                input_cnpj.clear()
-                                input_cnpj.send_keys(cpf_reu)
+                                _selecionar_select(
+                                    driver, (By.ID, "selTipoPessoa"), "value", "PJ",
+                                    contexto=f"tipo PJ do Reu na linha {num_fila}", espera_apos=1
+                                )
+                                _preencher_campo(
+                                    driver, (By.ID, "txtCpfCnpj"), cpf_reu,
+                                    contexto=f"CNPJ do Reu na linha {num_fila}"
+                                )
                                 clicar_seguro(driver, wait, '//*[@id="btnConsultarNome"]')
                                 time.sleep(1.5)
                                 clicar_seguro(driver, wait, '//*[@id="btnIncluir"]')
@@ -1234,22 +1675,25 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                     # --- DOCUMENTOS E FINALIZAÇÃO ---
                     detectar_campos_novos(driver, "Tela Documentos", status, num_fila)
                     status.configure(text=f"L{num_fila}: Enviando PDF ({tipo_doc})...")
-                    upload = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
-                    upload.send_keys(CAMINHO_PDF)
-                    campo_doc = wait.until(EC.presence_of_element_located((By.ID, "txtTipo_1")))
-                    driver.execute_script("arguments[0].click();", campo_doc)
-                    time.sleep(0.5)
-                    campo_doc.clear()
-                    driver.execute_script("arguments[0].value = '';", campo_doc)
-                    campo_doc.send_keys(tipo_doc)
+                    _executar_com_retry_stale(
+                        lambda: (driver.find_element(By.XPATH, "//input[@type='file']").send_keys(CAMINHO_PDF), True)[1],
+                        contexto=f"upload do PDF da linha {num_fila}"
+                    )
+                    _preencher_campo(
+                        driver, (By.ID, "txtTipo_1"), tipo_doc,
+                        contexto=f"tipo de documento da linha {num_fila}"
+                    )
                     time.sleep(3)
                     # Mesma logica do incluir_autocomplete(): clica na sugestao via
                     # ActionChains em vez de navegar por teclado (seta+Enter parou de
                     # confirmar a selecao no eProc).
-                    wait.until(EC.visibility_of_element_located((By.ID, "divInfraAjaxtxtTipo_1")))
+                    WebDriverWait(driver, 60).until(EC.visibility_of_element_located((By.ID, "divInfraAjaxtxtTipo_1")))
                     time.sleep(0.5)
-                    sugestao_doc = driver.find_element(By.XPATH, "//div[@id='divInfraAjaxtxtTipo_1']//li[1]/a")
-                    actions.move_to_element(sugestao_doc).pause(0.3).click().perform()
+                    _clicar_opcao_por_texto(
+                        driver, tipo_doc,
+                        xpath="//div[@id='divInfraAjaxtxtTipo_1']//li/a",
+                        contexto=f"seleção do tipo de documento da linha {num_fila}"
+                    )
                     time.sleep(1)
                     clicar_seguro(driver, wait, '//*[@id="btnEnviarArquivos"]')
                     time.sleep(2)
@@ -1259,10 +1703,14 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                         alerta.accept()
                         time.sleep(1)
                         # Exclui o documento duplicado
-                        btn_excluir = wait.until(EC.presence_of_element_located(
-                            (By.CLASS_NAME, "btnExcluirDocumento")
-                        ))
-                        driver.execute_script("arguments[0].click();", btn_excluir)
+                        btn_excluir = _obter_elemento(driver, (By.CLASS_NAME, "btnExcluirDocumento"), wait=60)
+                        _executar_com_retry_stale(
+                            lambda: (driver.execute_script(
+                                "arguments[0].click();",
+                                _obter_elemento(driver, (By.CLASS_NAME, "btnExcluirDocumento"), wait=60)
+                            ), True)[1],
+                            contexto=f"exclusão de documento duplicado da linha {num_fila}"
+                        )
                         time.sleep(1)
                         try:
                             driver.switch_to.alert.accept()
@@ -1271,19 +1719,22 @@ def executar_peticionamento_lote(status, perfil_cinprot=False):
                         time.sleep(1)
                         # Reenvia o arquivo
                         status.configure(text=f"L{num_fila}: Reenviando PDF apos excluir duplicado...")
-                        upload2 = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='file']")))
-                        upload2.send_keys(CAMINHO_PDF)
-                        campo_doc2 = wait.until(EC.presence_of_element_located((By.ID, "txtTipo_1")))
-                        driver.execute_script("arguments[0].click();", campo_doc2)
-                        time.sleep(0.5)
-                        campo_doc2.clear()
-                        driver.execute_script("arguments[0].value = '';", campo_doc2)
-                        campo_doc2.send_keys(tipo_doc)
+                        _executar_com_retry_stale(
+                            lambda: (driver.find_element(By.XPATH, "//input[@type='file']").send_keys(CAMINHO_PDF), True)[1],
+                            contexto=f"reenvio do PDF da linha {num_fila}"
+                        )
+                        _preencher_campo(
+                            driver, (By.ID, "txtTipo_1"), tipo_doc,
+                            contexto=f"reenvio do tipo de documento da linha {num_fila}"
+                        )
                         time.sleep(3)
-                        wait.until(EC.visibility_of_element_located((By.ID, "divInfraAjaxtxtTipo_1")))
+                        WebDriverWait(driver, 60).until(EC.visibility_of_element_located((By.ID, "divInfraAjaxtxtTipo_1")))
                         time.sleep(0.5)
-                        sugestao_doc2 = driver.find_element(By.XPATH, "//div[@id='divInfraAjaxtxtTipo_1']//li[1]/a")
-                        actions.move_to_element(sugestao_doc2).pause(0.3).click().perform()
+                        _clicar_opcao_por_texto(
+                            driver, tipo_doc,
+                            xpath="//div[@id='divInfraAjaxtxtTipo_1']//li/a",
+                            contexto=f"reseleção do tipo de documento da linha {num_fila}"
+                        )
                         time.sleep(1)
                         clicar_seguro(driver, wait, '//*[@id="btnEnviarArquivos"]')
                         time.sleep(2)
@@ -2529,7 +2980,7 @@ class AuraApp(ctk.CTk):
         global USUARIO, SENHA, URL, GROQ_API_KEY
         USUARIO = self.entry_usuario.get().strip()
         SENHA   = self.entry_senha.get().strip()
-        URL     = self.entry_url.get().strip()
+        URL     = _codificar_url(self.entry_url.get().strip())
         if USUARIO and SENHA and URL:
             GROQ_API_KEY = carregar_config().get("groq_key", "")
             _agente_mod.init(GROQ_API_KEY)
@@ -2588,7 +3039,7 @@ class AuraApp(ctk.CTk):
             nova_senha   = entry_senha.get().strip()
             nova_url     = entry_url.get().strip()
             if novo_usuario and nova_senha and nova_url:
-                USUARIO, SENHA, URL = novo_usuario, nova_senha, nova_url
+                USUARIO, SENHA, URL = novo_usuario, nova_senha, _codificar_url(nova_url)
                 salvar_config(USUARIO, SENHA, URL, GROQ_API_KEY)
                 self.lbl_chip_usuario.configure(text=f"  👤  {USUARIO}  ")
                 messagebox.showinfo("AURA", "Login atualizado.")
@@ -2756,7 +3207,8 @@ class AuraApp(ctk.CTk):
 
         def _ao_selecionar_competencia(nome_aba, linhas):
             global DADOS_COMPETENCIA, NOME_COMPETENCIA
-            DADOS_COMPETENCIA = linhas
+            nome_aba = _higienizar_texto(nome_aba)
+            DADOS_COMPETENCIA = _higienizar_dados_planilha(linhas)
             NOME_COMPETENCIA  = nome_aba
             if lbl_strip_comp:
                 txt = (nome_aba[:28] + "…") if len(nome_aba) > 28 else nome_aba
